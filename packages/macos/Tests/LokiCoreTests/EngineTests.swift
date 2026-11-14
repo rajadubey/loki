@@ -61,6 +61,7 @@ private let machinesJSON = #"""
 
     @Test func failedReloadLeavesActiveUnchanged() async throws {
         runner.on("nginx", ["-s", "reload"], FakeRunner.fail("not running"))
+        runner.on("pgrep", ["-f", "nginx: master"], FakeRunner.ok("1\n"))  // running, but refuses the reload: no restart
         await #expect(throws: NginxError.reloadFailed(output: "not running")) { try await engine.connect("dev") }
         #expect(!tmp.exists(".loki/active"))
     }

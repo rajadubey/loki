@@ -70,6 +70,7 @@ struct IntegrationTests {
         let box = try ParitySandbox(machines: machinesJSON)
         try await box.engine.connect("dev")
         box.mark("fail-reload")
+        box.mark("master-running")  // running, but refuses the reload: no restart
 
         await #expect(throws: NginxError.self) { try await box.engine.reload() }
         #expect(box.engine.store.activeName() == "dev")

@@ -234,9 +234,33 @@ public struct Nginx: Sendable {
             try? (previous ?? Data()).write(to: dest, options: .atomic)
             throw NginxError.testFailed(output: test.output.trimmingCharacters(in: .whitespacesAndNewlines))
         }
-        let reload = await reload()
+        let reload = await reloadOrStart()
         guard reload.succeeded else {
             throw NginxError.reloadFailed(output: reload.output.trimmingCharacters(in: .whitespacesAndNewlines))
         }
+    }
+
+    /// Starts nginx this many times while the old listen sockets are still bound.
+    public var startAttempts = 10
+    public var startRetryDelay: Duration = .seconds(1)
+
+    /// `nginx -s reload`, or, when no master is running (e.g. a stale pid file), stop any
+    /// stragglers and start nginx, retrying only on "Address already in use".
+    /// A running nginx that refuses to reload is a real error and is left alone. Same as loki.sh's reload_nginx.
+    public func reloadOrStart() async -> CommandResult {
+        let reload = await reload()
+        if reload.succeeded { return reload }
+        if await isRunning() { return reload }
+        _ = await runner.run("pkill", ["-f", "nginx: (master|worker)"])
+        var last = reload
+        for _ in 0..<max(1, startAttempts) {
+            last = await runner.run("nginx", [])
+            if last.succeeded { return last }
+            // brew services / launchd may have respawned it; then a reload loads our config
+            if await isRunning(), await self.reload().succeeded { return CommandResult(status: 0, output: "") }
+            guard last.output.contains("Address already in use") else { break }
+            try? await Task.sleep(for: startRetryDelay)
+        }
+        return last
     }
 }

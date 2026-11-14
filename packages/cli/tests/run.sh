@@ -11,6 +11,7 @@ SRC="$CLI/loki.sh"
 REAL_REMOTE=/opt/homebrew/etc/nginx/remote.conf
 REAL_SUM=""; [ -f "$REAL_REMOTE" ] && REAL_SUM=$(cksum < "$REAL_REMOTE")
 ORIG_PATH=$PATH
+REAL_NGINX=$(pgrep -f 'nginx: master' 2>/dev/null | head -1)
 VERSION=$(sed -n 's/^VERSION=//p' "$SRC")
 
 TMPROOT=$(mktemp -d "${TMPDIR:-/tmp}/loki-tests.XXXXXX") || exit 2
@@ -46,6 +47,14 @@ if [ "${1-} ${2-}" = "-s reload" ]; then
   cat "$HOME/.loki/active" > "$FAKE/active_at_reload" 2>/dev/null || echo "<none>" > "$FAKE/active_at_reload"
   [ -f "$FAKE/fail_reload" ] && { echo 'nginx: [error] invalid PID number "" in "/x/nginx.pid"' >&2; exit 1; }
 fi
+# bare `nginx` = start; fail_start holds the error to print
+if [ $# -eq 0 ] && [ -f "$FAKE/fail_start" ]; then cat "$FAKE/fail_start" >&2; exit 1; fi
+exit 0
+EOF
+# Never let tests reach the real pkill: it would stop the developer's running nginx.
+cat > "$FAKEBIN/pkill" <<'EOF'
+#!/usr/bin/env bash
+echo "pkill $*" >> "$FAKE/calls.log"
 exit 0
 EOF
 cat > "$FAKEBIN/sudo" <<'EOF'
@@ -61,6 +70,8 @@ cat > "$FAKEBIN/pgrep" <<'EOF'
 #!/usr/bin/env bash
 echo "pgrep $*" >> "$FAKE/pgrep.log"
 [ -f "$FAKE/root_nginx" ] && { echo 1; exit 0; }
+# master_running: an nginx master owned by the user (not matched by `-u 0`)
+case "$*" in *"-u 0"*) ;; *) [ -f "$FAKE/master_running" ] && { echo 1; exit 0; } ;; esac
 exit 1
 EOF
 cat > "$FAKEBIN/scp" <<'EOF'
@@ -225,11 +236,45 @@ test_connect_failed_test_ignores_stale_prev() {
 
 test_connect_failed_reload() {
   machines; set_active m2
-  touch "$FAKE/fail_reload"
+  touch "$FAKE/fail_reload" "$FAKE/master_running"  # nginx runs but refuses the reload
   loki connect m1
   rc_fail "connect"
   has "error" "nginx reload failed" "$OUT"
   eq "active unchanged" m2 "$(active)"
+  hasnt "running nginx not killed" "pkill" "$(calls)"
+  hasnt "running nginx not restarted" "nginx ," "$(calls),"
+}
+
+test_reload_starts_nginx_when_not_running() {
+  machines; set_active m2
+  touch "$FAKE/fail_reload"  # stale pid file, no master: reload can't work
+  loki connect m1
+  rc_ok "connect"
+  has "stragglers stopped" "pkill -f nginx: (master|worker)" "$(calls)"
+  has "nginx started" "nginx -s reload,pkill -f nginx: (master|worker),nginx ," "$(calls),"
+  eq "active switched" m1 "$(active)"
+}
+
+test_start_retries_while_address_in_use() {
+  machines; set_active m2
+  touch "$FAKE/fail_reload"
+  echo 'nginx: [emerg] bind() to 0.0.0.0:1111 failed (48: Address already in use)' > "$FAKE/fail_start"
+  export LOKI_START_ATTEMPTS=2
+  loki connect m1
+  rc_fail "connect"
+  has "error shown" "Address already in use" "$OUT"
+  eq "retried" 2 "$(grep -c '^nginx $' "$FAKE/calls.log")"
+  eq "active unchanged" m2 "$(active)"
+}
+
+test_start_does_not_retry_other_errors() {
+  machines; set_active m2
+  touch "$FAKE/fail_reload"
+  echo 'nginx: [emerg] unknown directive "x" in nginx.conf:1' > "$FAKE/fail_start"
+  loki connect m1
+  rc_fail "connect"
+  has "error shown" "unknown directive" "$OUT"
+  eq "no retry" 1 "$(grep -c '^nginx $' "$FAKE/calls.log")"
 }
 
 test_reload_without_active() {
@@ -270,7 +315,7 @@ test_disconnect_success() {
 
 test_disconnect_failed_reload_keeps_active() {
   machines; set_active m1
-  touch "$FAKE/fail_reload"
+  touch "$FAKE/fail_reload" "$FAKE/master_running"
   loki disconnect
   rc_fail "disconnect"
   eq "active kept" m1 "$(active)"
@@ -516,6 +561,12 @@ N=$((N+1))
 if [ -n "$REAL_SUM" ] && [ "$REAL_SUM" != "$(cksum < "$REAL_REMOTE")" ]; then
   TFAIL=$((TFAIL+1)); echo "FAIL real $REAL_REMOTE changed during the run"
 else TPASS=$((TPASS+1)); echo "ok   real_remote_conf_unchanged"; fi
+
+# A real nginx running before the run must still be running (tests must never reach real pkill/nginx).
+N=$((N+1))
+if [ -n "$REAL_NGINX" ] && [ "$REAL_NGINX" != "$(pgrep -f 'nginx: master' 2>/dev/null | head -1)" ]; then
+  TFAIL=$((TFAIL+1)); echo "FAIL the real nginx (pid $REAL_NGINX) was stopped during the run"
+else TPASS=$((TPASS+1)); echo "ok   real_nginx_untouched"; fi
 
 echo
 echo "$N tests, $TPASS passed, $TFAIL failed, $TSKIP skipped ($ASSERTS assertions)"

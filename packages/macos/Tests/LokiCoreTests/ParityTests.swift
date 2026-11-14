@@ -39,7 +39,7 @@ final class ParitySandbox: @unchecked Sendable {
         let r = root.path, nginxConf = "\(root.path)/conf/nginx.conf"
         let fakes = [
             "nginx": """
-            echo "$*" >> '\(r)/nginx.calls'
+            echo "${*:-<start>}" >> '\(r)/nginx.calls'
             case "$1" in
               -t)
                 if [ -e '\(r)/fail-test' ]; then
@@ -51,10 +51,20 @@ final class ParitySandbox: @unchecked Sendable {
                 echo "nginx: configuration file \(nginxConf) test is successful" >&2 ;;
               -s)
                 if [ -e '\(r)/fail-reload' ]; then echo 'nginx: [error] invalid PID number "" in "\(r)/nginx.pid"' >&2; exit 1; fi ;;
+              "")  # start
+                if [ -e '\(r)/fail-start' ]; then echo 'nginx: [emerg] unknown directive "x" in \(nginxConf):1' >&2; exit 1; fi ;;
               *) echo "nginx version: nginx/1.27.0 (fake)" >&2 ;;
             esac
             """,
-            "pgrep": "[ -e '\(r)/root-nginx' ]",
+            // `-u 0` asks for a root master (root-nginx); otherwise any master (master-running or root-nginx)
+            "pgrep": """
+            case "$*" in
+              *"-u 0"*) [ -e '\(r)/root-nginx' ] ;;
+              *) [ -e '\(r)/master-running' ] || [ -e '\(r)/root-nginx' ] ;;
+            esac
+            """,
+            // Never reach the real pkill: it would stop the developer's running nginx.
+            "pkill": "echo \"pkill $*\" >> '\(r)/nginx.calls'",
             // Safety net: the CLI must never get to real sudo from a test.
             "sudo": "echo \"fake sudo refused: $*\" >&2; exit 1",
             // scp [opts] user@host:/path dest -> cp /path dest
@@ -237,14 +247,43 @@ struct ParityTests {
 
     @Test func failedReloadLeavesTheSameStateInBoth() async throws {
         let (cli, app) = try twins(fixtures[0].json)
-        cli.mark("fail-reload")
-        app.mark("fail-reload")
+        cli.mark("fail-reload"); cli.mark("master-running")  // running, refuses reload
+        app.mark("fail-reload"); app.mark("master-running")
         #expect(await !cli.cli("connect", "dev").succeeded)
         await #expect(throws: NginxError.self) { try await app.engine.connect("dev") }
         // nginx accepted the file, so it stays installed; but 'active' is not set.
         expectSameState(cli, app)
         #expect(app.activeBytes == nil)
         #expect(app.installed?.contains("upstream web") == true)
+    }
+
+    /// main's fix (4f07f29): with no nginx master (stale pid), reload fails, so both start nginx instead.
+    @Test func bothStartNginxWhenNoMasterIsRunning() async throws {
+        let (cli, app) = try twins(fixtures[0].json)
+        cli.mark("fail-reload")
+        app.mark("fail-reload")
+        let r = await cli.cli("connect", "dev")
+        #expect(r.succeeded, "\(r.output)")
+        try await app.engine.connect("dev")
+        expectSameState(cli, app)
+        #expect(app.activeBytes == Data("dev\n".utf8))
+        for box in [cli, app] {
+            let calls = box.calls("nginx")
+            #expect(calls.contains("pkill -f nginx: (master|worker)"), "\(calls)")
+            #expect(calls.contains("<start>"), "a bare `nginx` start: \(calls)")
+        }
+    }
+
+    @Test func neitherRestartsARunningNginxThatRefusesTheReload() async throws {
+        let (cli, app) = try twins(fixtures[0].json)
+        cli.mark("fail-reload"); cli.mark("master-running")
+        app.mark("fail-reload"); app.mark("master-running")
+        _ = await cli.cli("connect", "dev")
+        _ = try? await app.engine.connect("dev")
+        for box in [cli, app] {
+            let calls = box.calls("nginx")
+            #expect(!calls.contains { $0.hasPrefix("pkill") } && !calls.contains("<start>"), "\(calls)")
+        }
     }
 
     @Test func unknownMachineChangesNothingInBoth() async throws {

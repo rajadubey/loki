@@ -146,6 +146,7 @@ private final class Box: @unchecked Sendable {
     @Test func failedReloadKeepsNewConfig() async throws {
         try runner.scriptNginx(confDir: confDir)
         runner.on("nginx", ["-s", "reload"], FakeRunner.fail("nginx: [error] open() \"/opt/homebrew/var/run/nginx.pid\" failed (2: No such file or directory)\n"))
+        runner.on("pgrep", ["-f", "nginx: master"], FakeRunner.ok("1\n"))  // running, but refuses the reload: no restart
         await #expect(throws: NginxError.reloadFailed(output: "nginx: [error] open() \"/opt/homebrew/var/run/nginx.pid\" failed (2: No such file or directory)")) {
             try await nginx.install(config: newConfig)
         }

@@ -4,7 +4,7 @@
 # LOKI - NGINX Machine Configurator
 # ===========================
 
-VERSION=1.0.0
+VERSION=1.0.2
 
 LOKI_HOME="$HOME/.loki"
 CONF_PATH="$LOKI_HOME/machine.json"
@@ -169,13 +169,35 @@ apply_conf() {
   fi
 
   log "Reloading nginx..."
-  if ! out=$($SUDO nginx -s reload 2>&1); then
-    log "nginx -s reload output: $out"
+  if ! out=$(reload_nginx); then
+    log "nginx reload output: $out"
     err "nginx reload failed (is nginx running? brew services start nginx):"
     err "$out"
     exit 1
   fi
   log "Nginx reload successful"
+}
+
+# `nginx -s reload`, or, when no nginx master is running (e.g. a stale pid file), stop any
+# stragglers and start nginx, retrying while the old listen sockets are still bound
+# ("Address already in use") for up to LOKI_START_ATTEMPTS seconds. A running nginx that
+# refuses to reload is a real error and is left alone. Uses $SUDO from apply_conf.
+reload_nginx() {
+  local out i
+  out=$($SUDO nginx -s reload 2>&1) && return 0
+  if pgrep -f 'nginx: master' >/dev/null 2>&1; then echo "$out"; return 1; fi
+
+  log "nginx isn't running, starting it..." >&2
+  # -f: nginx retitles itself "nginx: master process …", so -x never matches
+  $SUDO pkill -f 'nginx: (master|worker)' 2>/dev/null || true
+  for ((i = 0; i < ${LOKI_START_ATTEMPTS:-10}; i++)); do
+    out=$($SUDO nginx 2>&1) && return 0
+    # brew services / launchd may have respawned it already; then a reload loads our config
+    pgrep -f 'nginx: master' >/dev/null 2>&1 && $SUDO nginx -s reload >/dev/null 2>&1 && return 0
+    case "$out" in *"Address already in use"*) sleep 1 ;; *) break ;; esac
+  done
+  echo "$out"
+  return 1
 }
 
 cmd_status() {
