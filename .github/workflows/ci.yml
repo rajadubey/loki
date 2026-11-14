@@ -1,0 +1,31 @@
+# Tests both packages on every push and pull request.
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+    tags-ignore: ["**"]  # tags are handled by release.yml
+  pull_request:
+
+jobs:
+  cli:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-15]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install jq and shellcheck
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y jq shellcheck
+      - name: CLI tests
+        run: bash packages/cli/tests/run.sh
+
+  macos:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tests
+        run: packages/macos/scripts/test.sh
+      - name: Build app
+        run: packages/macos/scripts/build.sh
