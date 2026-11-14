@@ -1,0 +1,5 @@
+# graft's local graph cache — regenerable, not committed (run `graft build`).
+/graft/
+# Swift build output (SwiftPM and packages/macos/scripts/*.sh)
+.build/
+.swiftpm/

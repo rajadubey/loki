@@ -1,0 +1,53 @@
+# Builds the macOS app DMG for a version tag (created by scripts/release.sh) and publishes a GitHub release.
+name: Release
+
+on:
+  push:
+    tags: ["[0-9]+.[0-9]+.[0-9]+"]
+
+permissions:
+  contents: write  # create the release and upload assets
+
+jobs:
+  release:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check tag matches the versions in the repo
+        run: |
+          tag="$GITHUB_REF_NAME"
+          [ "$(tr -d '[:space:]' < VERSION)" = "$tag" ] || { echo "::error::VERSION file doesn't say $tag. Use scripts/release.sh."; exit 1; }
+          [ "$(sed -n 's/^VERSION=//p' packages/cli/loki.sh)" = "$tag" ] || { echo "::error::loki.sh VERSION= doesn't say $tag."; exit 1; }
+
+      - name: CLI tests
+        run: bash packages/cli/tests/run.sh
+
+      - name: macOS tests
+        run: packages/macos/scripts/test.sh
+
+      - name: Build universal app and DMG
+        run: packages/macos/scripts/build.sh --dmg
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          out=packages/macos/.build/app
+          cat > notes.md <<EOF
+          ## Install the app
+          1. Download **Loki-$GITHUB_REF_NAME.dmg**, open it and drag Loki to Applications.
+          2. The app isn't notarized, so macOS blocks the first launch. Open **System Settings → Privacy & Security** and click **Open Anyway**, or run:
+             \`xattr -dr com.apple.quarantine /Applications/Loki.app\`
+          3. On first launch Loki opens **Setup**, which checks nginx and fixes what's missing.
+
+          ## CLI (macOS and Linux)
+          \`curl -o- https://raw.githubusercontent.com/$GITHUB_REPOSITORY/$GITHUB_REF_NAME/packages/cli/install.sh | bash\`
+          EOF
+          gh release create "$GITHUB_REF_NAME" \
+            "$out/Loki-$GITHUB_REF_NAME.dmg" \
+            "$out/Loki-$GITHUB_REF_NAME.dmg.sha256" \
+            packages/cli/loki.sh \
+            --title "Loki $GITHUB_REF_NAME" \
+            --notes-file notes.md \
+            --generate-notes
