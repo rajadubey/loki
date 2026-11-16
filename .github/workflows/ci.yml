@@ -1,11 +1,10 @@
-# Tests both packages on every push and pull request.
+# Tests both packages after a PR merges into main. Nothing runs on PRs or other branches;
+# run the tests locally before merging (see Development in README.md).
 name: CI
 
 on:
   push:
-    branches: ["**"]
-    tags-ignore: ["**"]  # tags are handled by release.yml
-  pull_request:
+    branches: [main]
 
 jobs:
   cli:
