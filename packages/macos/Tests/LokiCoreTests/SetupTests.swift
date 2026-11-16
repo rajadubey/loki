@@ -273,12 +273,15 @@ private let plainConf = "worker_processes 1;\nevents {}\nhttp {\n    server { li
         #expect(script.hasPrefix(#"do shell script "PATH='"#))
         #expect(script.hasSuffix(#"" with administrator privileges"#))
         #expect(script.contains("launchctl bootout system/homebrew.mxcl.nginx"))
+        #expect(script.contains("launchctl bootout system/sh.brew.nginx"))
+        // unloading alone brings root nginx back at the next boot
+        #expect(script.contains("rm -f /Library/LaunchDaemons/homebrew.mxcl.nginx.plist /Library/LaunchDaemons/sh.brew.nginx.plist"))
         #expect(script.contains("nginx -s stop"))
         #expect(script.contains("; rm -f '/opt/homebrew/var/run/nginx.pid'"))
         #expect(runner.calls.last == ["brew", "services", "restart", "nginx"])
 
         try await setup.apply(.stopRootNginx(pidPath: nil))
-        #expect(runner.calls[2].last?.contains("rm -f") == false)
+        #expect(runner.calls[2].last?.hasSuffix(#"sleep 1" with administrator privileges"#) == true)  // no pid file to remove
     }
 
     @Test func navigationFixesRunNothing() async throws {

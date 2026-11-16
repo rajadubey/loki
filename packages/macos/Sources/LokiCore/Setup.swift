@@ -175,8 +175,9 @@ public struct SetupAssistant: Sendable {
             try check(await admin.run("rm -f \(shellQuote(path))"), "Couldn't remove \(path)")
             try await startService()
         case .stopRootNginx(let pidPath):
-            // Stop the root copy (and its launchd job, if `sudo brew services` started it), then start ours.
-            var cmd = "PATH=\(shellQuote(ProcessRunner.defaultPath)); launchctl bootout system/homebrew.mxcl.nginx 2>/dev/null; nginx -s stop 2>/dev/null; sleep 1"
+            // Stop the root copy, then start ours. `sudo brew services` leaves a plist in /Library/LaunchDaemons
+            // (sh.brew.nginx since Homebrew 7) that starts root nginx again at every boot, so delete it, not just unload it.
+            var cmd = "PATH=\(shellQuote(ProcessRunner.defaultPath)); launchctl bootout system/homebrew.mxcl.nginx 2>/dev/null; launchctl bootout system/sh.brew.nginx 2>/dev/null; rm -f /Library/LaunchDaemons/homebrew.mxcl.nginx.plist /Library/LaunchDaemons/sh.brew.nginx.plist; nginx -s stop 2>/dev/null; sleep 1"
             if let pidPath { cmd += "; rm -f \(shellQuote(pidPath))" }
             try check(await admin.run(cmd), "Couldn't stop the root nginx")
             try await startService()
