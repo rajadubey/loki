@@ -4,7 +4,13 @@
 
 LOKI_INSTALL_DIR="${LOKI_DIR:-$HOME/.loki}"
 LOKI_REPO="rajadubey/loki"
-LOKI_RAW_URL="https://raw.githubusercontent.com/$LOKI_REPO/1.0.1/packages/cli/loki.sh"
+# loki.sh attached to the latest GitHub release (by .github/workflows/release.yml), or to a
+# specific one with LOKI_VERSION=2.0.0. Nothing here needs bumping on release.
+if [ -n "${LOKI_VERSION:-}" ]; then
+  LOKI_RAW_URL="https://github.com/$LOKI_REPO/releases/download/$LOKI_VERSION/loki.sh"
+else
+  LOKI_RAW_URL="https://github.com/$LOKI_REPO/releases/latest/download/loki.sh"
+fi
 
 # Colors for output
 RED='\033[0;31m'

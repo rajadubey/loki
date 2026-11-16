@@ -2,7 +2,7 @@
 
 All notable changes to LOKI are documented here.
 
-## [Unreleased]
+## [2.0.0] - 2026-11-14
 
 ### Added
 - **Loki for macOS** (`packages/macos`): menu bar app with live service health, machine switcher,

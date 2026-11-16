@@ -64,10 +64,11 @@ packages/macos/scripts/build.sh      # builds packages/macos/.build/app/Loki.app
 
 ## Releasing
 
-From a clean working tree:
+The tag is the version. Either:
 
-```bash
-scripts/release.sh 1.1.0
-```
+- create a release on GitHub's **Draft a new release** page with a new tag like `2.1.0` (or `v2.1.0`), or
+- run `scripts/release.sh 2.1.0` from a clean working tree: it also sets `VERSION` and the CLI's `VERSION=` so the repo matches, runs both test suites, commits, tags and pushes after you confirm.
 
-It sets `VERSION`, the CLI's `VERSION=` and the tag `install.sh` downloads from, runs both test suites, builds the app, commits `Release 1.1.0`, tags `1.1.0`, and pushes after you confirm. The tag starts `.github/workflows/release.yml`, which tests again, builds a universal DMG and publishes a GitHub release with `Loki-1.1.0.dmg`, its SHA-256, and `loki.sh`.
+The tag starts `.github/workflows/release.yml`. It tests again, builds a universal DMG stamped with the tag's version, and attaches `Loki-2.1.0.dmg`, its SHA-256 and `loki.sh` to the release (creating the release if it doesn't exist; notes written on the release page are kept). The CLI's `install.sh` always downloads `loki.sh` from the latest release, or a given one with `LOKI_VERSION=2.1.0`.
+
+To rebuild an existing release, run the workflow by hand: **Actions → Release → Run workflow** with its tag, or `gh workflow run release.yml -f tag=2.1.0`.

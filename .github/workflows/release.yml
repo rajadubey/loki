@@ -1,24 +1,40 @@
-# Builds the macOS app DMG for a version tag (created by scripts/release.sh) and publishes a GitHub release.
+# Builds the macOS DMG and attaches it, with loki.sh, to the GitHub release for a version tag.
+# The tag is the version, however it was made: GitHub's "Draft a new release" page,
+# `git push origin X.Y.Z`, or scripts/release.sh. If the release already exists (made on the
+# release page), the files are added to it; otherwise the release is created.
+# To (re)build an existing release, run this workflow by hand with its tag.
 name: Release
 
 on:
   push:
-    tags: ["[0-9]+.[0-9]+.[0-9]+"]
+    tags: ["[0-9]+.[0-9]+.[0-9]+", "v[0-9]+.[0-9]+.[0-9]+"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to build for, e.g. 2.0.0 (built from the branch selected above)
+        required: true
 
 permissions:
-  contents: write  # create the release and upload assets
+  contents: write  # create or edit the release and upload assets
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
 
 jobs:
   release:
     runs-on: macos-15
+    env:
+      TAG: ${{ inputs.tag || github.ref_name }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - name: Check tag matches the versions in the repo
+      - name: Version from the tag
         run: |
-          tag="$GITHUB_REF_NAME"
-          [ "$(tr -d '[:space:]' < VERSION)" = "$tag" ] || { echo "::error::VERSION file doesn't say $tag. Use scripts/release.sh."; exit 1; }
-          [ "$(sed -n 's/^VERSION=//p' packages/cli/loki.sh)" = "$tag" ] || { echo "::error::loki.sh VERSION= doesn't say $tag."; exit 1; }
+          v="${TAG#v}"
+          [[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::Tag '$TAG' isn't X.Y.Z"; exit 1; }
+          echo "LOKI_VERSION=$v" >> "$GITHUB_ENV"
+          repo_v=$(tr -d '[:space:]' < VERSION)
+          [ "$repo_v" = "$v" ] || echo "::notice::VERSION file says $repo_v; building as $v from the tag."
 
       - name: CLI tests
         run: bash packages/cli/tests/run.sh
@@ -27,27 +43,39 @@ jobs:
         run: packages/macos/scripts/test.sh
 
       - name: Build universal app and DMG
-        run: packages/macos/scripts/build.sh --dmg
+        run: packages/macos/scripts/build.sh --dmg  # uses LOKI_VERSION
 
-      - name: Publish release
+      - name: Collect release files
+        run: |
+          mkdir -p dist
+          sed "s/^VERSION=.*/VERSION=$LOKI_VERSION/" packages/cli/loki.sh > dist/loki.sh
+          cp "packages/macos/.build/app/Loki-$LOKI_VERSION.dmg" "packages/macos/.build/app/Loki-$LOKI_VERSION.dmg.sha256" dist/
+          ls -l dist
+
+      - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          out=packages/macos/.build/app
-          cat > notes.md <<EOF
+          cat > install-notes.md <<EOF
           ## Install the app
-          1. Download **Loki-$GITHUB_REF_NAME.dmg**, open it and drag Loki to Applications.
+          1. Download **Loki-$LOKI_VERSION.dmg**, open it and drag Loki to Applications.
           2. The app isn't notarized, so macOS blocks the first launch. Open **System Settings → Privacy & Security** and click **Open Anyway**, or run:
              \`xattr -dr com.apple.quarantine /Applications/Loki.app\`
           3. On first launch Loki opens **Setup**, which checks nginx and fixes what's missing.
 
-          ## CLI (macOS and Linux)
-          \`curl -o- https://raw.githubusercontent.com/$GITHUB_REPOSITORY/$GITHUB_REF_NAME/packages/cli/install.sh | bash\`
+          ## Install the CLI (macOS and Linux)
+          \`curl -o- https://raw.githubusercontent.com/$GITHUB_REPOSITORY/main/packages/cli/install.sh | bash\`
           EOF
-          gh release create "$GITHUB_REF_NAME" \
-            "$out/Loki-$GITHUB_REF_NAME.dmg" \
-            "$out/Loki-$GITHUB_REF_NAME.dmg.sha256" \
-            packages/cli/loki.sh \
-            --title "Loki $GITHUB_REF_NAME" \
-            --notes-file notes.md \
-            --generate-notes
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber
+            # Keep the notes written on the release page; add the install steps once.
+            body=$(gh release view "$TAG" --json body -q .body)
+            case "$body" in
+              *"## Install the app"*) ;;
+              *) printf '%s\n\n%s\n' "$body" "$(cat install-notes.md)" > notes.md
+                 gh release edit "$TAG" --notes-file notes.md ;;
+            esac
+          else
+            gh release create "$TAG" dist/* --verify-tag --title "Loki $LOKI_VERSION" \
+              --notes-file install-notes.md --generate-notes
+          fi
