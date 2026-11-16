@@ -57,17 +57,19 @@ nc -z localhost 8081 && echo ok         # use one of your local ports
 
 ## nginx runs as root
 
-The app says *"nginx here belongs to root"*, or Setup shows *nginx runs as root*. In Setup, click **Switch to my user**. By hand, the same fix (errors about jobs or files that don't exist are fine):
+The app says *"nginx here belongs to root"*, or Setup shows *nginx runs as root*. In Setup, click **Switch to my user**. By hand (errors about jobs or files that don't exist are fine):
 
 ```bash
+P=$(brew --prefix)    # /opt/homebrew, or /usr/local on Intel Macs
 sudo launchctl bootout system/homebrew.mxcl.nginx; sudo launchctl bootout system/sh.brew.nginx
 sudo rm -f /Library/LaunchDaemons/homebrew.mxcl.nginx.plist /Library/LaunchDaemons/sh.brew.nginx.plist
-sudo nginx -s stop; sudo rm -f /opt/homebrew/var/run/nginx.pid
-sudo chown -R "$USER" /opt/homebrew/etc/nginx /opt/homebrew/var/run/nginx /opt/homebrew/var/log/nginx
+sudo "$P/bin/nginx" -s stop; sudo rm -f "$P/var/run/nginx.pid"
+sudo chown -R "$USER" "$P/etc/nginx" "$P/var/run/nginx" "$P/var/log/nginx" "$P/Cellar/nginx"
+sudo chown -h "$USER" "$P/opt/nginx"
 brew services restart nginx
 ```
 
-Unloading the launchd job isn't enough: as long as its plist stays in `/Library/LaunchDaemons`, root nginx comes back at the next boot.
+Unloading the launchd job isn't enough: as long as its plist stays in `/Library/LaunchDaemons`, root nginx comes back at the next boot. `sudo brew services` also makes nginx's binary root's, so `brew upgrade` or `brew uninstall` later fails with *Could not remove nginx keg*; the two `chown` lines hand everything back (Setup's button doesn't, so run them once if you see that error).
 
 ## Remove everything (clean reinstall)
 
@@ -86,12 +88,15 @@ rm -rf ~/.loki
 # then delete the LOKI lines from ~/.profile (LOKI_DIR, PATH) and ~/.zshrc (LOKI_SSH_*)
 
 # 4. Loki's nginx wiring
-rm -f /opt/homebrew/etc/nginx/remote.conf /opt/homebrew/etc/nginx/remote.conf.prev
+P=$(brew --prefix)
+rm -f "$P/etc/nginx/remote.conf" "$P/etc/nginx/remote.conf.prev"
 # then delete the `include …/remote.conf;` line from the stream block in nginx.conf
 
-# 5. nginx itself (Homebrew keeps /opt/homebrew/etc/nginx)
+# 5. nginx itself (Homebrew keeps $P/etc/nginx)
 brew services stop nginx
 brew uninstall nginx
+# "Could not remove nginx keg" means it once ran with sudo:
+#   sudo rm -rf "$P/Cellar/nginx" "$P/opt/nginx"
 ```
 
 If nginx ever ran as root, also remove its launchd job as in [nginx runs as root](#nginx-runs-as-root). To set up again, start from step 2; restore your machines with `mkdir -p ~/.loki && cp ~/loki-backup/machine.json ~/.loki/`, or sync them.
