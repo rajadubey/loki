@@ -1,40 +1,53 @@
-# Builds the macOS DMG and attaches it, with loki.sh, to the GitHub release for a version tag.
-# The tag is the version, however it was made: GitHub's "Draft a new release" page,
-# `git push origin X.Y.Z`, or scripts/release.sh. If the release already exists (made on the
-# release page), the files are added to it; otherwise the release is created.
-# To (re)build an existing release, run this workflow by hand with its tag.
+# Publishes a release when a PR that changes VERSION merges into main: tests both packages, builds
+# the universal DMG, then creates the tag (the version, e.g. 2.0.1) on the merged commit and a GitHub
+# release with the DMG, its SHA-256 and loki.sh. Nothing runs on PRs, other branches or tag pushes.
+# To rebuild an existing release (or add files to one made on the release page), run this workflow
+# by hand from main with its tag: it builds the tagged commit and replaces the files.
 name: Release
 
 on:
   push:
-    tags: ["[0-9]+.[0-9]+.[0-9]+", "v[0-9]+.[0-9]+.[0-9]+"]
+    branches: [main]
+    paths: [VERSION]
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing release tag to build for, e.g. 2.0.0 (built from the branch selected above)
+        description: Existing release tag to rebuild, e.g. 2.0.1
         required: true
 
 permissions:
-  contents: write  # create or edit the release and upload assets
+  contents: write  # create the tag and release, upload assets
 
 concurrency:
-  group: release-${{ inputs.tag || github.ref_name }}
+  group: release
 
 jobs:
   release:
+    if: github.ref == 'refs/heads/main'  # merged code only, also when run by hand
     runs-on: macos-15
     env:
-      TAG: ${{ inputs.tag || github.ref_name }}
+      GH_TOKEN: ${{ github.token }}
+      REBUILD_TAG: ${{ inputs.tag }}
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.tag || github.sha }}
 
-      - name: Version from the tag
+      - name: Version
         run: |
-          v="${TAG#v}"
-          [[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::Tag '$TAG' isn't X.Y.Z"; exit 1; }
+          if [ -n "$REBUILD_TAG" ]; then
+            tag="$REBUILD_TAG"
+          else
+            tag=$(tr -d '[:space:]' < VERSION)
+            if gh release view "$tag" >/dev/null 2>&1 || git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null; then
+              echo "::error::$tag is already released. Bump VERSION to release again, or rebuild $tag by hand (Actions → Release → Run workflow)."
+              exit 1
+            fi
+          fi
+          v="${tag#v}"
+          [[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::'$tag' isn't X.Y.Z"; exit 1; }
+          echo "TAG=$tag" >> "$GITHUB_ENV"
           echo "LOKI_VERSION=$v" >> "$GITHUB_ENV"
-          repo_v=$(tr -d '[:space:]' < VERSION)
-          [ "$repo_v" = "$v" ] || echo "::notice::VERSION file says $repo_v; building as $v from the tag."
 
       - name: CLI tests
         run: bash packages/cli/tests/run.sh
@@ -53,15 +66,15 @@ jobs:
           ls -l dist
 
       - name: Publish
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
           cat > install-notes.md <<EOF
           ## Install the app
-          1. Download **Loki-$LOKI_VERSION.dmg**, open it and drag Loki to Applications.
-          2. The app isn't notarized, so macOS blocks the first launch. Open **System Settings → Privacy & Security** and click **Open Anyway**, or run:
+          Full steps, including a clean reinstall: [SETUP.md](https://github.com/$GITHUB_REPOSITORY/blob/$TAG/SETUP.md)
+          1. Run nginx as yourself: \`brew install nginx && brew services start nginx\` (never with sudo).
+          2. Download **Loki-$LOKI_VERSION.dmg**, open it and drag Loki to Applications.
+          3. The app isn't notarized, so macOS blocks the first launch. Open **System Settings → Privacy & Security** and click **Open Anyway**, or run:
              \`xattr -dr com.apple.quarantine /Applications/Loki.app\`
-          3. On first launch Loki opens **Setup**, which checks nginx and fixes what's missing.
+          4. On first launch Loki opens **Setup**, which checks nginx and fixes what's missing.
 
           ## Install the CLI (macOS and Linux)
           \`curl -o- https://raw.githubusercontent.com/$GITHUB_REPOSITORY/main/packages/cli/install.sh | bash\`
@@ -76,6 +89,6 @@ jobs:
                  gh release edit "$TAG" --notes-file notes.md ;;
             esac
           else
-            gh release create "$TAG" dist/* --verify-tag --title "Loki $LOKI_VERSION" \
+            gh release create "$TAG" dist/* --target "$GITHUB_SHA" --title "Loki $LOKI_VERSION" \
               --notes-file install-notes.md --generate-notes
           fi

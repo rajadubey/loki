@@ -2,6 +2,21 @@
 
 All notable changes to LOKI are documented here.
 
+## [2.0.1] - 2026-11-16
+
+### Fixed
+- The app's Setup fix **Switch to my user** now deletes nginx's `/Library/LaunchDaemons` job
+  (`homebrew.mxcl.nginx` or Homebrew 7's `sh.brew.nginx`, left by `sudo brew services`) instead of
+  only unloading it, so nginx no longer comes back as root after a reboot.
+
+### Changed
+- GitHub Actions run only after a PR merges into main: CI on every merge, CodeQL on every merge
+  (replacing the default setup that scanned PRs), Release when `VERSION` changed. A release is
+  now a merged PR that bumps `VERSION`; the workflow creates the tag. Tag pushes no longer
+  start a build.
+- New [SETUP.md](SETUP.md): install from scratch, run nginx as yourself, fix a root nginx, and
+  remove everything for a clean reinstall.
+
 ## [2.0.0] - 2026-11-14
 
 ### Added

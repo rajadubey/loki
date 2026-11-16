@@ -1,0 +1,24 @@
+# CodeQL scan of the Swift code after a PR merges into main. Nothing runs on PRs.
+# Replaces the repo's CodeQL "default setup", which scans every PR and must stay off
+# (Settings → Code security → CodeQL analysis); GitHub rejects this workflow's results while it's on.
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  analyze:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: github/codeql-action/init@v4
+        with:
+          languages: swift
+          build-mode: autobuild
+      - uses: github/codeql-action/autobuild@v4
+      - uses: github/codeql-action/analyze@v4

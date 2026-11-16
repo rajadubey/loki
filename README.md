@@ -11,6 +11,8 @@ Two packages share the same data in `~/.loki/`, so you can use either or both:
 
 ## Install
 
+Step by step, including nginx and a clean reinstall: **[SETUP.md](SETUP.md)**. In short:
+
 - **App:** download `Loki-<version>.dmg` from [Releases](https://github.com/rajadubey/loki/releases), drag Loki to Applications, and allow the first launch in System Settings → Privacy & Security → Open Anyway (the app isn't notarized). On first launch, Setup checks nginx and fixes what's missing.
 - **CLI:** `curl -o- https://raw.githubusercontent.com/rajadubey/loki/main/packages/cli/install.sh | bash`
 
@@ -50,8 +52,8 @@ stream {
 VERSION                  single version for both packages
 packages/cli/            loki.sh, install.sh, uninstall.sh, tests/run.sh
 packages/macos/          Swift package: LokiCore (engine), LokiApp (menu bar app), tests, scripts/
-scripts/release.sh       bump version, test, tag, push
-.github/workflows/       ci.yml (tests on every push), release.yml (DMG on every tag)
+scripts/release.sh       bump version, test, commit, push a branch to open the release PR from
+.github/workflows/       ci.yml, codeql.yml, release.yml: all run only after a merge into main
 ```
 
 ## Development
@@ -62,13 +64,12 @@ packages/macos/scripts/test.sh       # Swift tests (unit, CLI parity, integratio
 packages/macos/scripts/build.sh      # builds packages/macos/.build/app/Loki.app
 ```
 
+GitHub Actions run only after a PR merges into main (CI, CodeQL, and Release when `VERSION` changed); nothing runs on PRs or other branches, so run both test suites before you merge. CodeQL's repo-level *default setup* must stay off (Settings → Code security → CodeQL analysis), because it scans every PR and blocks `codeql.yml`.
+
 ## Releasing
 
-The tag is the version. Either:
+A release is a PR that bumps `VERSION`. Run `scripts/release.sh 2.1.0` on a branch from a clean working tree: it sets `VERSION` and the CLI's `VERSION=`, runs both test suites, commits and pushes the branch after you confirm. Open a PR and merge it.
 
-- create a release on GitHub's **Draft a new release** page with a new tag like `2.1.0` (or `v2.1.0`), or
-- run `scripts/release.sh 2.1.0` from a clean working tree: it also sets `VERSION` and the CLI's `VERSION=` so the repo matches, runs both test suites, commits, tags and pushes after you confirm.
+The merge starts `.github/workflows/release.yml`. It tests again, builds a universal DMG stamped with the version, creates tag `2.1.0` on the merged commit and publishes a release with `Loki-2.1.0.dmg`, its SHA-256 and `loki.sh`. If that version was already released, the run fails and nothing is replaced. The CLI's `install.sh` always downloads `loki.sh` from the latest release, or a given one with `LOKI_VERSION=2.1.0`.
 
-The tag starts `.github/workflows/release.yml`. It tests again, builds a universal DMG stamped with the tag's version, and attaches `Loki-2.1.0.dmg`, its SHA-256 and `loki.sh` to the release (creating the release if it doesn't exist; notes written on the release page are kept). The CLI's `install.sh` always downloads `loki.sh` from the latest release, or a given one with `LOKI_VERSION=2.1.0`.
-
-To rebuild an existing release, run the workflow by hand: **Actions → Release → Run workflow** with its tag, or `gh workflow run release.yml -f tag=2.1.0`.
+To rebuild an existing release (or add the files to one drafted on GitHub's release page), run the workflow by hand from main: **Actions → Release → Run workflow** with its tag, or `gh workflow run release.yml -f tag=2.1.0`. It builds the tagged commit and replaces the files.

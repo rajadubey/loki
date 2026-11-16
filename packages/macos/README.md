@@ -17,7 +17,7 @@ Every 60 seconds it opens a TCP connection to each service's `ip:remote` (so non
 
 - **Machines:** add, edit and delete machines and services, with validation (names nginx accepts, ports 1–65535, no duplicate local ports). Import and export `machine.json`. Saving keeps `machine.json.bak` and reloads nginx when the connected machine changed.
 - **Sync:** SSH host, user, port and remote path for fetching `machine.json`, with *Test connection* and *Import from shell profile* (reads `LOKI_SSH_*` exports from `~/.zshrc` and friends). SSH runs without prompts, so the host needs key login and must be in `~/.ssh/known_hosts`.
-- **Setup:** checks nginx is installed, running as you, has a writable config folder and includes `remote.conf` in a `stream` block, plus machines and sync. Each problem has a fix button; the ones needing root (a stale root-owned pid file, a root nginx, folder ownership) use the standard macOS password prompt. Setup opens by itself on first launch when something's missing.
+- **Setup:** checks nginx is installed, running as you, has a writable config folder and includes `remote.conf` in a `stream` block, plus machines and sync. Each problem has a fix button; the ones needing root (a stale root-owned pid file, a root nginx, folder ownership) use the standard macOS password prompt. Switching a root nginx to you also deletes its `/Library/LaunchDaemons` job, which would otherwise start it as root again at every boot. Setup opens by itself on first launch when something's missing.
 - **General:** open at login, shortcut, data folder.
 
 The app never runs `sudo`: nginx has to run as you, which is what `brew services start nginx` does, and local ports above 1024 don't need root.
