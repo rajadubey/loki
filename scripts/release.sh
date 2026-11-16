@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Cuts a release of both packages: scripts/release.sh 1.1.0
-#   1. sets VERSION, VERSION= in packages/cli/loki.sh, and the tag install.sh downloads from
+# Optional: making a release on GitHub's release page works too (the tag is the version).
+# This script also keeps the repo's version numbers in step:
+#   1. sets VERSION and VERSION= in packages/cli/loki.sh
 #   2. runs the CLI and macOS test suites and builds the app (fails before tagging if anything breaks)
 #   3. commits "Release 1.1.0" and creates tag 1.1.0
 #   4. after you confirm, pushes the branch and tag; .github/workflows/release.yml then
@@ -19,14 +21,13 @@ echo "Releasing $(cat VERSION) -> $version from branch $branch"
 
 printf '%s\n' "$version" > VERSION
 sed -i '' "s/^VERSION=.*/VERSION=$version/" packages/cli/loki.sh
-sed -i '' -E "s#(raw.githubusercontent.com/\\\$LOKI_REPO/)[^/]+(/packages/cli/loki.sh)#\1$version\2#" packages/cli/install.sh
 
 echo "Running tests…"
 bash packages/cli/tests/run.sh >/dev/null
 packages/macos/scripts/test.sh >/dev/null
 packages/macos/scripts/build.sh >/dev/null
 
-git add VERSION packages/cli/loki.sh packages/cli/install.sh
+git add VERSION packages/cli/loki.sh
 git commit -q -m "Release $version"
 git tag -a "$version" -m "Release $version"
 echo "Created commit and tag $version."

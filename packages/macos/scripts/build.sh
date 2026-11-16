@@ -3,12 +3,13 @@
 #   scripts/build.sh            build for this Mac's architecture -> .build/app/Loki.app
 #   scripts/build.sh --install  build and copy to /Applications
 #   scripts/build.sh --dmg      universal (Apple silicon + Intel) build -> .build/app/Loki-<version>.dmg
-# The version comes from the repo's VERSION file.
+# The version comes from $LOKI_VERSION if set (release builds), else the repo's VERSION file.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-version=$(tr -d '[:space:]' < ../../VERSION)
-[ -n "$version" ] || { echo "VERSION file is empty" >&2; exit 1; }
+# LOKI_VERSION (set by the release workflow from the tag) wins over the VERSION file
+version="${LOKI_VERSION:-$(tr -d '[:space:]' < ../../VERSION)}"
+[ -n "$version" ] || { echo "No version: VERSION file is empty" >&2; exit 1; }
 mode="${1:-}"
 archs=$(uname -m)
 [ "$mode" = --dmg ] && archs="arm64 x86_64"
