@@ -2,6 +2,11 @@
 
 All notable changes to LOKI are documented here.
 
+## [Unreleased]
+
+### Added
+- The macOS app has its own icon instead of the generic one.
+
 ## [2.0.1] - 2026-11-16
 
 ### Fixed

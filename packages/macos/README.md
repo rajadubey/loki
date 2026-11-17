@@ -30,6 +30,7 @@ Sources/LokiCore/      engine, no UI: Machines, Store, Nginx, Sync, Health, Engi
 Sources/LokiApp/       menu bar app: App, AppModel, Components, Panel/, Settings/
 Tests/LokiCoreTests/   Swift Testing: unit, CLI parity and integration tests
 Resources/Info.plist
+Resources/AppIcon.icns app icon (see Building)
 scripts/build.sh       compiles with swiftc and assembles Loki.app (--install, --dmg)
 scripts/test.sh        runs the tests (swift test, or swiftc when SwiftPM isn't usable)
 ```
@@ -49,3 +50,14 @@ Two toolchain notes:
 
 - `build.sh` uses `swiftc` directly rather than `swift build`, so it also works where SwiftPM is broken, and `test.sh` falls back the same way. `Package.swift` describes the same targets for Xcode and `swift test`.
 - On the macOS 27 SDK, SwiftUI's `@State` and `@Bindable` are macros that only Xcode ships. The app keeps view state in `@Observable` classes and builds bindings with `Binding(object, \.keyPath)` (see `Components.swift`), so it builds with or without Xcode.
+
+To change the app icon, start from a 1024×1024 PNG with the rounded tile on a transparent background (Apple's macOS template leaves about 100px around it), then convert it with tools that ship with macOS:
+
+```bash
+mkdir AppIcon.iconset
+for s in 16 32 128 256 512; do
+  sips -z $s $s icon.png --out AppIcon.iconset/icon_${s}x${s}.png
+  sips -z $((s*2)) $((s*2)) icon.png --out AppIcon.iconset/icon_${s}x${s}@2x.png
+done
+iconutil -c icns AppIcon.iconset -o Resources/AppIcon.icns
+```

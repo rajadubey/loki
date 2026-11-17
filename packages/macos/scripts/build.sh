@@ -35,6 +35,7 @@ lipo -create "$out"/obj/*/Loki -output "$app/Contents/MacOS/Loki"
 rm -rf "$out/obj"
 
 cp Resources/Info.plist "$app/Contents/"
+cp Resources/AppIcon.icns "$app/Contents/Resources/"
 plutil -replace CFBundleShortVersionString -string "$version" "$app/Contents/Info.plist"
 codesign --force -s - "$app"  # ad-hoc; Developer ID signing would remove the Gatekeeper prompt
 echo "Built $app $version ($archs)"
