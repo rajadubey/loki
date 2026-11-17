@@ -213,6 +213,23 @@ private let plainConf = "worker_processes 1;\nevents {}\nhttp {\n    server { li
         #expect(c.detail == "/srv/m.json")
     }
 
+    @Test func syncSettingsSyncWouldRefuseAreAWarningNotAGreenCheck() throws {
+        try tmp.write(".loki/config", "LOKI_SYNC_URL='https://bob:pa55@example.com/m.json'\n")
+        let c = setup.syncCheck()
+        #expect(c.state == .warning)
+        #expect(c.title == "Sync can't run")
+        #expect(c.fix == .openSync)
+        #expect(!c.detail.contains("pa55"))
+    }
+
+    @Test func syncFromURLShowsItWithoutTheQuery() throws {
+        try tmp.write(".loki/config", "LOKI_SSH_HOST=build\nLOKI_SYNC_URL='https://gist.githubusercontent.com/u/abc/raw/machine.json?token=secret'\n")
+        let c = setup.syncCheck()
+        #expect(c.state == .ok)
+        #expect(c.title == "Sync from gist.githubusercontent.com")
+        #expect(c.detail == "https://gist.githubusercontent.com/u/abc/raw/machine.json")
+    }
+
     // MARK: apply
 
     @Test func startNginxRestartsTheBrewService() async throws {

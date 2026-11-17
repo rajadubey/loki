@@ -17,7 +17,7 @@ private let fixedDate = Calendar.current.date(from: DateComponents(year: 2024, m
             server 10.0.0.5:5432;
         }
         server {
-            listen 5433;
+            listen 127.0.0.1:5433;
             proxy_pass db;
         }
 
@@ -25,7 +25,7 @@ private let fixedDate = Calendar.current.date(from: DateComponents(year: 2024, m
             server 10.0.0.5:80;
         }
         server {
-            listen 8080;
+            listen 127.0.0.1:8080;
             proxy_pass web;
         }
 
@@ -53,7 +53,7 @@ private let fixedDate = Calendar.current.date(from: DateComponents(year: 2024, m
         let out = NginxConfig.render(machineName: "m", machine: machine, date: fixedDate)
         #expect(!out.contains("upstream a "))
         #expect(!out.contains("upstream b "))
-        #expect(out.hasSuffix("\nupstream c {\n    server 1.2.3.4:82;\n}\nserver {\n    listen 8082;\n    proxy_pass c;\n}\n"))
+        #expect(out.hasSuffix("\nupstream c {\n    server 1.2.3.4:82;\n}\nserver {\n    listen 127.0.0.1:8082;\n    proxy_pass c;\n}\n"))
         #expect(out.components(separatedBy: "upstream ").count == 2)
     }
 

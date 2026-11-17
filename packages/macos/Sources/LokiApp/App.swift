@@ -34,8 +34,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         item.button?.action = #selector(toggle)
         model.onChange = { [weak self] in self?.updateTitle() }
         model.openSettings = { [weak self] tab in self?.showSettings(tab) }
+        model.makeDataFolderPrivate()
         model.reload()
         model.startLoop()
+        model.startUpdateChecks()
         registerHotKey()
         Task {
             await model.refreshSetup()

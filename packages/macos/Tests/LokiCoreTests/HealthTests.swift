@@ -113,4 +113,9 @@ private final class LocalListener: @unchecked Sendable {
         try await Task.sleep(for: .milliseconds(100))
         #expect(await httpProbe(port: port) == nil)
     }
+
+    @Test func storedIntervalOutsideTheChoicesFallsBackToAMinute() {
+        for seconds in HealthInterval.choices { #expect(HealthInterval.sanitized(seconds) == seconds) }
+        for seconds in [0, -15, 1, 45, 86_400, Int.max] { #expect(HealthInterval.sanitized(seconds) == 60) }
+    }
 }

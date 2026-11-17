@@ -12,11 +12,25 @@ ACTIVE_FILE="$LOKI_HOME/active"
 TMP_CONF="$LOKI_HOME/remote.conf"
 LOG_FILE="$LOKI_HOME/loki.log"
 
-mkdir -p "$LOKI_HOME"
+# ~/.loki holds machine addresses and sync settings, so the folder is owner-only like ~/.ssh (the
+# macOS app does the same at launch): other users can't reach anything in it. Only the folder: a
+# blanket chmod would quietly "fix" a world-writable config that the check below must refuse, and
+# a umask would leak into nginx when loki starts it.
+mkdir -p "$LOKI_HOME" && chmod 700 "$LOKI_HOME/"
+# Bounded like the app's: past 1 MB the log becomes loki.log.1
+[ -f "$LOG_FILE" ] && [ "$(wc -c < "$LOG_FILE")" -gt 1000000 ] && mv -f "$LOG_FILE" "$LOG_FILE.1"
 
 # Settings such as LOKI_SSH_HOST can live here instead of .bashrc/.zshrc;
 # apps opened from Finder (the macOS app) never read shell profiles.
-[ -f "$LOKI_HOME/config" ] && . "$LOKI_HOME/config"
+# It runs as shell code, so only when it's yours and not writable by everyone. -H judges the file a
+# symlink points to; group-writable is fine (Linux gives each user their own group).
+if [ -f "$LOKI_HOME/config" ]; then
+  if [ -O "$LOKI_HOME/config" ] && [ -z "$(find -H "$LOKI_HOME/config" -perm -002)" ]; then
+    . "$LOKI_HOME/config"
+  else
+    echo "loki: ignoring $LOKI_HOME/config: it must be yours and not writable by everyone (chmod 600 $LOKI_HOME/config)" >&2
+  fi
+fi
 
 # ---------- Colors ----------
 GREEN="\033[1;32m"
@@ -33,6 +47,36 @@ err() { echo -e "${RED}$1${RESET}" >&2; }
 
 get_active() { [ -f "$ACTIVE_FILE" ] && cat "$ACTIVE_FILE"; }
 set_active() { echo "$1" > "$ACTIVE_FILE"; }
+# For remote.conf's header comment, which ends at a line break: CR and LF become spaces (the app's
+# NginxConfig.oneLine), so an unchecked value (disconnect doesn't check) can't start a directive.
+one_line() { printf '%s' "$1" | tr '\r\n' '  '; }
+
+# What's wrong with the machine list on stdin, one problem per line; nothing when it's fine.
+# Names, IPs and ports are written into nginx's config, so anything that could inject a directive
+# is refused: the app's rules. Strict (downloads) also wants both ports of every service; otherwise
+# a service missing one is allowed and skipped, as connect always did.
+machine_problems() {
+  jq -rs --argjson strict "${1:-false}" '
+    def ok($re): type == "string" and test($re);
+    if length != 1 or (.[0] | type) != "object" then "it is not a JSON object of machines"
+    else .[0] | to_entries[] | .key as $m | .value as $v |
+      if ($m | ok("\\A[A-Za-z0-9._-]+\\z") | not) then "machine name \($m | tojson) can only use letters, digits, \".\", \"_\" and \"-\""
+      elif ($v | type) != "object" then "\($m): not an object"
+      elif ($v.ip | ok("\\A[A-Za-z0-9.:\\[\\]-]+\\z") | not) or ($v.ip | startswith("-")) then "\($m): \($v.ip | tojson) is not a valid IP address or hostname"
+      elif ($v.services | type) != "object" then "\($m): \"services\" must be an object"
+      else
+        ($v.services | to_entries[] | .key as $s | .value as $p |
+          if ($s | ok("\\A[A-Za-z0-9_-]+\\z") | not) then "\($m): service name \($s | tojson) can only use letters, digits, \"_\" and \"-\""
+          elif ($p | type) != "object" then "\($m) → \($s): not an object"
+          elif any($p.local, $p.remote; . != null and (type != "number" or . != floor)) then "\($m) → \($s): ports must be whole numbers from 1 to 65535"
+          elif $p.local == null or $p.remote == null then (if $strict then "\($m) → \($s): set both the local and the remote port" else empty end)
+          elif any($p.local, $p.remote; . < 1 or . > 65535) then "\($m) → \($s): ports must be whole numbers from 1 to 65535"
+          else empty end),
+        # Like the app, a service missing a port is skipped, so it neither clashes nor needs a range
+        ([$v.services[] | objects | select(.local != null and .remote != null) | .local] | group_by(.)[] | select(length > 1) | "\($m): local port \(.[0]) is used by more than one service")
+      end
+    end' 2>/dev/null || echo "it is not valid JSON"
+}
 
 detect_nginx_conf_dir() {
   log "Detecting nginx configuration directory..."
@@ -118,23 +162,30 @@ cmd_connect() {
 # next to nginx.conf, tests it and reloads nginx. Exits non-zero on any failure,
 # leaving the previous remote.conf in place.
 apply_conf() {
-  local name="$1" with_config="${2:-true}" ip conf_dir dest out s local_port remote_port
-  ip=$(jq -r --arg n "$name" '.[$n].ip' "$CONF_PATH")
+  local name="$1" with_config="${2:-true}" ip conf_dir dest out s local_port remote_port problems
 
-  if [ "$ip" = null ]; then
+  if [ "$(jq -r --arg n "$name" 'has($n)' "$CONF_PATH" 2>/dev/null)" = false ]; then
     # Machine is gone from machine.json (e.g. after sync): empty the proxy. Same text as the macOS app.
-    echo "# Auto-generated remote.conf: $name was removed from machine.json" > "$TMP_CONF"
+    echo "# Auto-generated remote.conf: $(one_line "$name") was removed from machine.json" > "$TMP_CONF"
   else
+  # Checked before anything is written or logged, like the app's connect and reload
+  if [ "$with_config" = true ]; then
+    problems=$( { jq --arg n "$name" '{($n): .[$n]}' "$CONF_PATH" 2>/dev/null || echo "not JSON"; } | machine_problems)
+    # printf, not err's echo -e: the text quotes machine.json, which could hold escape sequences
+    [ -n "$problems" ] && { err "machine.json can't be used for $name:"; printf '%s\n' "$problems" >&2; exit 1; }
+  fi
+  ip=$(jq -r --arg n "$name" '.[$n].ip' "$CONF_PATH")
   log "Generating NGINX config for $name ($ip)"
   {
-    echo "# Auto-generated remote.conf for $name ($ip) [$(date '+%Y-%m-%d %H:%M:%S')]"
+    echo "# Auto-generated remote.conf for $(one_line "$name") ($(one_line "$ip")) [$(date '+%Y-%m-%d %H:%M:%S')]"
     if [ "$with_config" = true ]; then
-      # Sorted by name: the macOS app renders the same file in the same order
-      jq -r --arg n "$name" '.[$n].services | to_entries | sort_by(.key)[] | "\(.key) \(.value.local) \(.value.remote)"' "$CONF_PATH" |
+      # Sorted by name, services missing a port skipped, ports as whole numbers (8080.0 -> 8080):
+      # the macOS app renders the same file. 127.0.0.1 only: on every interface, anyone on the
+      # network could use this machine to reach the remote ones.
+      jq -r --arg n "$name" '.[$n].services | to_entries | sort_by(.key)[] | select(.value.local != null and .value.remote != null)
+        | "\(.key) \(.value.local | floor) \(.value.remote | floor)"' "$CONF_PATH" |
         while read -r s local_port remote_port; do
-          # Skip services with missing ports instead of writing a broken config
-          { [ "$local_port" = null ] || [ "$remote_port" = null ]; } && continue
-          printf '\nupstream %s {\n    server %s:%s;\n}\nserver {\n    listen %s;\n    proxy_pass %s;\n}\n' \
+          printf '\nupstream %s {\n    server %s:%s;\n}\nserver {\n    listen 127.0.0.1:%s;\n    proxy_pass %s;\n}\n' \
             "$s" "$ip" "$remote_port" "$local_port" "$s"
         done
     fi
@@ -203,16 +254,17 @@ reload_nginx() {
 cmd_status() {
   active=$(get_active)
   [ -z "$active" ] && { warn "No active machine"; exit 0; }
-  ip=$(jq -r ".\"$active\".ip" "$CONF_PATH")
+  # --arg: spliced into the filter, a quote in the name would change what jq runs
+  ip=$(jq -r --arg n "$active" '.[$n].ip' "$CONF_PATH")
   ok "📡 Active machine: $active (${ip})"
-  jq -r ".\"$active\".services | to_entries[] | \" - \(.key): local=\(.value.local), remote=\(.value.remote)\"" "$CONF_PATH"
+  jq -r --arg n "$active" '.[$n].services | to_entries[] | " - \(.key): local=\(.value.local), remote=\(.value.remote)"' "$CONF_PATH"
 }
 
 cmd_ping() {
   active=$(get_active)
   [ -z "$active" ] && { err "No active machine"; exit 1; }
   log "🔍 Checking services for $active"
-  jq -r ".\"$active\".services | to_entries[] | \"\(.key) \(.value.local)\"" "$CONF_PATH" |
+  jq -r --arg n "$active" '.[$n].services | to_entries[] | "\(.key) \(.value.local)"' "$CONF_PATH" |
     while read -r name port; do
       echo -n "  $name (localhost:$port): "
       
@@ -263,17 +315,49 @@ cmd_reload() {
 }
 
 cmd_sync() {
-  ssh_user="${LOKI_SSH_USER:-root}"
-  ssh_host="${LOKI_SSH_HOST:?Please set LOKI_SSH_HOST in .bashrc/.zshrc}"
-  ssh_port="${LOKI_SSH_PORT:-22}"
-  remote_path="${LOKI_REMOTE_MACHINES_JSON:-/mnt/machines.json}"
+  local active src problems
+  # Download beside machine.json and swap: a failed transfer leaves a truncated target
+  if [ -n "${LOKI_SYNC_URL:-}" ]; then
+    # The app's rules: https only; no quotes, backslashes or spaces (it goes into curl's config as "…");
+    # no user:password@ (config and log are plain text)
+    case "$LOKI_SYNC_URL" in https://*) ;; *) err "LOKI_SYNC_URL must start with https://"; exit 1 ;; esac
+    case "$LOKI_SYNC_URL" in *\"*|*\\*|*[[:space:][:cntrl:]]*) err "LOKI_SYNC_URL can't contain spaces, quotes or backslashes"; exit 1 ;; esac
+    src="${LOKI_SYNC_URL#https://}"; src="${src%%[/?#]*}"
+    case "$src" in *@*) err "Leave the user name and password out of LOKI_SYNC_URL"; exit 1 ;; esac
+    src="${LOKI_SYNC_URL%%[?#]*}"  # the query may hold a token: keep it out of the log
+    log "Fetching machines.json from $src ..."
+    # Same flags as the app. -q (first) skips ~/.curlrc; the URL comes on stdin (-K -), not the command
+    # line, where any user could read it with ps; https only, redirects included; size and time capped.
+    printf 'url = "%s"\n' "$LOKI_SYNC_URL" |
+      curl -q -K - -fsSL --proto =https --proto-redir =https --max-filesize 1000000 --max-time 30 -o "$CONF_PATH.tmp" ||
+      { rm -f "$CONF_PATH.tmp"; err "Could not download $src"; exit 1; }
+  else
+    ssh_user="${LOKI_SSH_USER:-root}"
+    ssh_host="${LOKI_SSH_HOST:?Please set LOKI_SSH_HOST (or LOKI_SYNC_URL) in ~/.loki/config or your shell profile}"
+    ssh_port="${LOKI_SSH_PORT:-22}"
+    remote_path="${LOKI_REMOTE_MACHINES_JSON:-/mnt/machines.json}"
 
-  log "Fetching machines.json from $ssh_user@$ssh_host:$remote_path ..."
-  # Download beside it and swap: scp truncates its target before an interrupted transfer
-  scp -P "$ssh_port" "$ssh_user@$ssh_host:$remote_path" "$CONF_PATH.tmp" || { rm -f "$CONF_PATH.tmp"; err "Could not fetch $remote_path from $ssh_host"; exit 1; }
-  mv "$CONF_PATH.tmp" "$CONF_PATH"
+    log "Fetching machines.json from $ssh_user@$ssh_host:$remote_path ..."
+    scp -P "$ssh_port" "$ssh_user@$ssh_host:$remote_path" "$CONF_PATH.tmp" || { rm -f "$CONF_PATH.tmp"; err "Could not fetch $remote_path from $ssh_host"; exit 1; }
+  fi
+  # Checked as the app checks it, before it replaces anything
+  if [ "$(wc -c < "$CONF_PATH.tmp")" -gt 1000000 ]; then problems="it is over 1 MB, which no machine list is"
+  else problems=$(machine_problems true < "$CONF_PATH.tmp"); fi
+  if [ -n "$problems" ]; then
+    rm -f "$CONF_PATH.tmp"
+    err "The downloaded file was rejected, so your machines are unchanged:"
+    printf '%s\n' "$problems" >&2  # not echo -e: it quotes the download, which could hold escape sequences
+    exit 1
+  fi
+  # Save what was checked, as jq read it, not the raw bytes: jq keeps the last of two duplicate keys and
+  # the app the first, so a hostile first copy could otherwise pass this check and reach the app.
+  if ! { jq . "$CONF_PATH.tmp" > "$CONF_PATH.new" && mv -f "$CONF_PATH.new" "$CONF_PATH"; }; then
+    rm -f "$CONF_PATH.tmp" "$CONF_PATH.new"
+    err "Could not save machine.json"
+    exit 1
+  fi
+  rm -f "$CONF_PATH.tmp"
   ok "✅ Updated local machines.json"
-  local active
   active=$(get_active)
   [ -z "$active" ] && return 0  # nothing connected, nothing to reload
   if jq -e --arg n "$active" 'has($n)' "$CONF_PATH" >/dev/null; then
@@ -448,7 +532,7 @@ case "$cmd" in
     echo "  status                   Show active machine and ports"
     echo "  ping                     Curl-check services on localhost"
     echo "  reload                   Generate & reload remote.conf"
-    echo "  sync                     Fetch machine.json via SSH using env variable"
+    echo "  sync                     Fetch machine.json from LOKI_SYNC_URL (https) or over SSH"
     echo "  edit                     Edit machine.json in \$EDITOR"
     echo "  tui                      Open interactive tmux dashboard"
     echo

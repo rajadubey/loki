@@ -19,6 +19,15 @@ public struct ServiceStatus: Equatable, Sendable {
 
 public let slowThresholdMs = 300
 
+/// How often the app checks health, in seconds (Settings → General). A stored value that isn't one
+/// of the choices (missing, or hand-edited defaults) falls back to every minute.
+public enum HealthInterval {
+    public static let choices = [15, 30, 60, 120, 300, 600]
+    public static let standard = 60
+
+    public static func sanitized(_ seconds: Int) -> Int { choices.contains(seconds) ? seconds : standard }
+}
+
 /// nil latency means the connection failed.
 public func classify(_ latencyMs: Int?) -> Health {
     guard let ms = latencyMs else { return .down }

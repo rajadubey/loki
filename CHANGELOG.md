@@ -6,6 +6,40 @@ All notable changes to LOKI are documented here.
 
 ### Added
 - The macOS app has its own icon instead of the generic one.
+- **Sync from a URL**: `machine.json` can come from an `https://` address such as a gist's Raw link, in the
+  app's Sync tab (with *Test download*) or `LOKI_SYNC_URL` for the CLI. It wins over SSH when set.
+- **Health check interval** in the app's Settings → General: every 15 seconds to 10 minutes (default 1 minute).
+- **Update button**: the app checks GitHub for a newer release at launch and daily (hourly while it can't
+  be reached) and shows a link to the releases page in the panel and an Update button in Settings →
+  General. Nothing installs by itself.
+- Security tests for both packages (`SecurityTests.swift`, `test_security_*` in the CLI suite) and parity
+  tests that both reject the same unsafe downloads.
+
+### Changed
+- **nginx listens on 127.0.0.1 only.** Before, every proxied port was open on all network interfaces, so
+  anyone on the same network could use your machine to reach the remote ones (VPN-only hosts included).
+  Reaching them from another device no longer works. If another device can still reach a port after you
+  update and reconnect, restart nginx once (`brew services restart nginx`).
+- **CLI sync is as strict as the app's:** a downloaded `machine.json` with a service missing a port, a
+  local port used twice, or anything else the app never accepted is now rejected, and your machines are
+  kept. 2.0.1 accepted such files, so a shared file that worked for CLI-only users may need fixing.
+- `~/.loki` is owner-only (0700); both packages tighten a folder older versions created world-readable.
+  The app writes its files there 0600. Its own preferences stay in its macOS defaults.
+- `loki.log` moves to `loki.log.1` past 1 MB instead of growing forever, in both packages.
+
+### Fixed
+- Disconnect could write an unchecked IP from `machine.json` into nginx's config, where a line break ended
+  the header comment and started real directives (both packages). Header values now stay on one line.
+- The CLI's `sync` now checks the download like the app does and saves the JSON it checked (a file listing
+  a machine twice could pass the CLI's check with one copy and reach the app with the other). `connect`
+  and `reload` refuse a machine whose name, address or ports could inject a directive into nginx's config,
+  and ports written like `8080.0` are written as `8080`.
+- The sync URL is never on curl's command line, where other users could read it with `ps`.
+- The CLI only sources `~/.loki/config` when it's yours and not writable by everyone (judging a symlink by
+  its target), and `status`/`ping` no longer splice the active machine's name into a `jq` filter.
+- Re-running the CLI installer (`curl … | bash`) updates an existing install instead of stopping at a prompt
+  a piped script can't answer, keeps the working `loki` when the download fails, and doesn't ask for sudo
+  when the link is already in place.
 
 ## [2.0.1] - 2026-11-16
 

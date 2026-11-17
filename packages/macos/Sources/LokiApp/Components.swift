@@ -81,7 +81,7 @@ struct Ring: View {
     }
 }
 
-/// One bar per check over the last hour, colored by the share of services up.
+/// One bar per check (the last 60), colored by the share of services up.
 struct TrendBars: View {
     let values: [Double]
 

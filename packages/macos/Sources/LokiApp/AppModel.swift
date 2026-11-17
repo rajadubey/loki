@@ -29,13 +29,17 @@ final class AppModel {
     var setupChecks: [SetupCheck] = []
     var openAtLogin = SMAppService.mainApp.status == .enabled
     var recents: [String] = UserDefaults.standard.stringArray(forKey: "recents") ?? []
+    /// Seconds between health checks. App-only, so it lives in the app's defaults, not ~/.loki.
+    var interval = TimeInterval(HealthInterval.sanitized(UserDefaults.standard.integer(forKey: "healthInterval")))
+    /// Version of a newer release, when GitHub has one.
+    var update: String?
 
     @ObservationIgnored var onChange: (() -> Void)?
     @ObservationIgnored var openSettings: ((SettingsTab) -> Void)?
     @ObservationIgnored private var notified: Set<String> = []
     @ObservationIgnored private var checking = false
-
-    let interval: TimeInterval = 60
+    @ObservationIgnored private var recheck = false
+    @ObservationIgnored private var loop: Task<Void, Never>?
 
     var store: MachineStore { engine.store }
     var activeMachine: Machine? { active.flatMap { machines[$0] } }
@@ -80,22 +84,70 @@ final class AppModel {
         setupChecks = await assistant.inspect()
     }
 
+    /// Older versions (app and CLI) created ~/.loki readable by every user of the Mac.
+    func makeDataFolderPrivate() {
+        do {
+            try engine.paths.makePrivate()
+        } catch {
+            engine.log.append("Couldn't make \(engine.paths.home.path) private (chmod 700 it): \(error.localizedDescription)")
+        }
+    }
+
     // MARK: Health
 
+    /// (Re)starts the check loop; the first check runs right away.
     func startLoop() {
-        Task {
-            while true {
+        loop?.cancel()
+        loop = Task {
+            while !Task.isCancelled {
                 await check()
                 nextCheck = Date().addingTimeInterval(interval)
-                try? await Task.sleep(for: .seconds(interval))
+                try? await Task.sleep(for: .seconds(interval))  // throws when cancelled, which ends the loop
             }
         }
     }
 
+    /// Saves the choice and restarts the loop, so it applies now instead of after the current wait.
+    func setInterval(_ seconds: Int) {
+        let seconds = HealthInterval.sanitized(seconds)
+        guard TimeInterval(seconds) != interval else { return }
+        interval = TimeInterval(seconds)
+        UserDefaults.standard.set(seconds, forKey: "healthInterval")
+        trend = []  // bars from the old interval would misstate the time they cover
+        startLoop()
+    }
+
+    /// What the trend's 60 bars cover: 60 checks × `interval` seconds = `interval` minutes.
+    var trendSpan: String {
+        let minutes = Int(interval)
+        return minutes == 60 ? "hour" : minutes % 60 == 0 ? "\(minutes / 60) hours" : "\(minutes) min"
+    }
+
+    /// One task for the app's lifetime: asks GitHub at launch, then daily, or hourly while it can't be
+    /// reached (at login Wi-Fi often isn't up yet).
+    func startUpdateChecks() {
+        Task {
+            while !Task.isCancelled {
+                let outcome = await UpdateCheck.run(current: version)
+                if case .newer(let latest) = outcome { update = latest }
+                try? await Task.sleep(for: .seconds(outcome == .unreachable ? 3_600 : 86_400))
+            }
+        }
+    }
+
+    /// A check asked for while one runs (after Connect, say) isn't dropped: the running one goes
+    /// again with fresh state, or the old machine's status would stay up until the next interval.
     func check() async {
-        guard !checking else { return }
+        guard !checking else { recheck = true; return }
         checking = true
         defer { checking = false }
+        repeat {
+            recheck = false
+            await checkOnce()
+        } while recheck
+    }
+
+    private func checkOnce() async {
         reload()
         nginxRunning = await engine.nginx.isRunning()
 

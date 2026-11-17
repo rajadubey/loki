@@ -11,24 +11,28 @@ The menu bar shows the connected machine and how many of its services are up: gr
 - **Log:** the latest lines of `~/.loki/loki.log`.
 - **Options:** check now, sync, reload, disconnect, Settings (⌘,), Setup, quit.
 
-Every 60 seconds it opens a TCP connection to each service's `ip:remote` (so non-HTTP services work too) and notifies you when one has been down for over a minute.
+Every minute (or every 15 seconds to 10 minutes, as set in Settings → General) it opens a TCP connection to each service's `ip:remote` (so non-HTTP services work too) and notifies you when one is still down a minute after it first failed; at intervals of a minute or more, that means two failed checks in a row.
+
+At launch and then once a day (hourly while GitHub can't be reached) it asks GitHub for the latest release. When there's a newer one, the panel shows **Loki X.Y.Z is available** and General shows an **Update** button; both open the release page to download the DMG. Nothing installs by itself.
 
 **Settings** has four tabs:
 
 - **Machines:** add, edit and delete machines and services, with validation (names nginx accepts, ports 1–65535, no duplicate local ports). Import and export `machine.json`. Saving keeps `machine.json.bak` and reloads nginx when the connected machine changed.
-- **Sync:** SSH host, user, port and remote path for fetching `machine.json`, with *Test connection* and *Import from shell profile* (reads `LOKI_SSH_*` exports from `~/.zshrc` and friends). SSH runs without prompts, so the host needs key login and must be in `~/.ssh/known_hosts`.
+- **Sync:** where `machine.json` comes from. **From a URL:** an `https://` address, such as a gist's Raw link without the commit id (`…/raw/machine.json`) so you always get the latest; *Test download* fetches and checks it without saving. **Over SSH:** host, user, port and remote path, with *Test connection* and *Import from shell profile* (reads `LOKI_SSH_*` exports from `~/.zshrc` and friends). SSH runs without prompts, so the host needs key login and must be in `~/.ssh/known_hosts`. A download replaces your machines only if it passes the same checks as the Machines tab.
 - **Setup:** checks nginx is installed, running as you, has a writable config folder and includes `remote.conf` in a `stream` block, plus machines and sync. Each problem has a fix button; the ones needing root (a stale root-owned pid file, a root nginx, folder ownership) use the standard macOS password prompt. Switching a root nginx to you also deletes its `/Library/LaunchDaemons` job, which would otherwise start it as root again at every boot. Setup opens by itself on first launch when something's missing.
-- **General:** open at login, shortcut, data folder.
+- **General:** open at login, shortcut, health check interval, data folder, version.
 
 The app never runs `sudo`: nginx has to run as you, which is what `brew services start nginx` does, and local ports above 1024 don't need root.
+
+Shared data stays in `~/.loki/` so the CLI can use it; the app makes that folder owner-only (0700) at launch and writes its files owner-only (0600). The app's own preferences (health check interval, recent machines) are in its macOS defaults (`defaults read local.loki.bar`).
 
 ## Layout
 
 ```
 Package.swift
-Sources/LokiCore/      engine, no UI: Machines, Store, Nginx, Sync, Health, Engine, Setup, Commands
+Sources/LokiCore/      engine, no UI: Machines, Store, Nginx, Sync, Health, Engine, Setup, Commands, Update
 Sources/LokiApp/       menu bar app: App, AppModel, Components, Panel/, Settings/
-Tests/LokiCoreTests/   Swift Testing: unit, CLI parity and integration tests
+Tests/LokiCoreTests/   Swift Testing: unit, security, CLI parity and integration tests
 Resources/Info.plist
 Resources/AppIcon.icns app icon (see Building)
 scripts/build.sh       compiles with swiftc and assembles Loki.app (--install, --dmg)

@@ -69,7 +69,9 @@ public struct LokiEngine: Sendable {
 
     /// Fetches machine.json, then reloads the active machine; if it no longer exists, disconnects.
     public func sync(_ settings: SyncSettings) async throws {
-        log.append("Fetching machines.json from \(settings.user)@\(settings.host):\(settings.remotePath) ...")
+        // Before logging: a refused URL may hold a user name and password
+        guard settings.problems.isEmpty else { throw SyncError.notConfigured(settings.problems) }
+        log.append("Fetching machines.json from \(settings.source) ...")
         let machines = try await syncer.sync(settings, into: store)
         log.append("✅ Updated local machines.json (\(machines.count) machines)")
         guard let active = store.activeName() else { return }
@@ -77,14 +79,15 @@ public struct LokiEngine: Sendable {
             try await reload()
         } else {
             log.append("Active machine \(active) is no longer in machine.json, disconnecting")
-            try await apply("# Auto-generated remote.conf: \(active) was removed from machine.json\n")
+            try await apply("# Auto-generated remote.conf: \(NginxConfig.oneLine(active)) was removed from machine.json\n")
             try store.setActive(nil)
         }
     }
 
     private func apply(_ config: String) async throws {
-        try? FileManager.default.createDirectory(at: paths.home, withIntermediateDirectories: true)
-        try? Data(config.utf8).write(to: paths.generatedConf, options: .atomic)
+        // The ~/.loki copy is only for inspection; installing it next to nginx.conf is what counts.
+        try? paths.ensurePrivateHome()
+        try? writePrivately(Data(config.utf8), to: paths.generatedConf)
         do {
             try await nginx.install(config: config)
         } catch {
