@@ -2,10 +2,9 @@
 
 All notable changes to LOKI are documented here.
 
-## [Unreleased]
+## [2.1.0] - 2026-11-18
 
 ### Added
-- The macOS app has its own icon instead of the generic one.
 - **Shared services in `machine.json`**: `containers` maps machine names to IPs, and each of those machines
   gets the top-level `services`, so machines that run the same services list them once. Every other key
   is still a machine with its own `ip` and `services`, so existing files work unchanged. Both packages
@@ -52,6 +51,15 @@ All notable changes to LOKI are documented here.
 - Re-running the CLI installer (`curl … | bash`) updates an existing install instead of stopping at a prompt
   a piped script can't answer, keeps the working `loki` when the download fails, and doesn't ask for sudo
   when the link is already in place.
+
+## [2.0.2] - 2026-11-17
+
+### Added
+- The macOS app has its own icon instead of the generic one.
+
+### Changed
+- CodeQL also scans the GitHub Actions workflows, as the repo's default setup did, and the CI workflow
+  runs with read-only access to the repository.
 
 ## [2.0.1] - 2026-11-16
 
