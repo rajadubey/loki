@@ -5,14 +5,22 @@ import Foundation
 public enum NginxConfig {
     /// remote.conf for one machine, byte-for-byte the CLI's format (services sorted by name).
     /// With `includeServices: false` it is just the header, which is how "disconnect" empties the proxy.
+    /// Ports listen on 127.0.0.1 only: on every interface, anyone on the same network could use this
+    /// Mac to reach the remote machines (VPN-only hosts included).
     public static func render(machineName: String, machine: Machine, includeServices: Bool = true, date: Date = Date()) -> String {
-        var out = "# Auto-generated remote.conf for \(machineName) (\(machine.ip)) [\(LokiLog.timestamp(date))]\n"
+        var out = "# Auto-generated remote.conf for \(oneLine(machineName)) (\(oneLine(machine.ip))) [\(LokiLog.timestamp(date))]\n"
         guard includeServices else { return out }
         for (service, p) in machine.ports.sorted(by: { $0.key < $1.key }) {
             out += "\nupstream \(service) {\n    server \(machine.ip):\(p.remote);\n}\n"
-            out += "server {\n    listen \(p.local);\n    proxy_pass \(service);\n}\n"
+            out += "server {\n    listen 127.0.0.1:\(p.local);\n    proxy_pass \(service);\n}\n"
         }
         return out
+    }
+
+    /// For the header comment, which ends at a line break: CR and LF become spaces (the CLI's `one_line`),
+    /// so a value nobody checked (disconnect writes the header without checking) can't start a directive.
+    public static func oneLine(_ s: String) -> String {
+        String(String.UnicodeScalarView(s.unicodeScalars.map { $0 == "\n" || $0 == "\r" ? " " : $0 }))
     }
 }
 

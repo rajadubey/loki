@@ -128,6 +128,63 @@ private func machine(_ ip: String, _ services: [String: (Int?, Int?)]) -> Machin
         #expect(m.ports == ["c": ResolvedPorts(local: 8082, remote: 82)])
     }
 
+    // MARK: containers and shared services
+
+    @Test func containersGetTheSharedServicesAndOtherMachinesOnlyTheirOwn() throws {
+        let json = #"""
+        {
+          "containers": { "c1": "10.0.1.1", "c2": "10.0.1.2" },
+          "services": { "web": { "local": 8080, "remote": 80 } },
+          "solo": { "ip": "10.0.2.1", "services": { "ssh": { "local": 2222, "remote": 22 } } }
+        }
+        """#
+        let file = try JSONDecoder().decode(MachineFile.self, from: Data(json.utf8))
+        #expect(file.all == [
+            "c1": machine("10.0.1.1", ["web": (8080, 80)]),
+            "c2": machine("10.0.1.2", ["web": (8080, 80)]),
+            "solo": machine("10.0.2.1", ["ssh": (2222, 22)]),
+        ])
+        #expect(validate(file).isEmpty)
+    }
+
+    @Test(arguments: [
+        #"{"m": {"ip": "10.0.0.1", "services": {}}}"#,
+        #"{"containers": null, "services": null, "m": {"ip": "10.0.0.1", "services": {}}}"#,
+    ])
+    func aFileWithoutContainersIsMachinesOnly(_ json: String) throws {
+        let file = try JSONDecoder().decode(MachineFile.self, from: Data(json.utf8))
+        #expect(file == MachineFile(machines: ["m": machine("10.0.0.1", [:])]))
+    }
+
+    @Test func aMachineOfItsOwnWinsOverAContainerOfTheSameName() {
+        // As in the CLI; validation refuses such a file, but a hand-edited one still loads
+        let file = MachineFile(machines: ["x": machine("1.1.1.1", [:])], containers: ["x": "2.2.2.2"],
+                               services: ["web": Ports(local: 8080, remote: 80)])
+        #expect(file.all == ["x": machine("1.1.1.1", [:])])
+    }
+
+    @Test func fileIssuesComeInStableOrderAndSharedServicesOnce() {
+        let file = MachineFile(
+            machines: ["dup": machine("1.1.1.1", [:]), "services": machine("1.1.1.2", [:])],
+            containers: ["dup": "1.1.1.3", "c1": "1.2.3.4;", "c2": "", "c3": "10.0.0.3", "containers": "1.1.1.4"],
+            services: ["s.x": Ports(local: 1, remote: nil), "a": Ports(local: 8080, remote: 80), "b": Ports(local: 8080, remote: 81)]
+        )
+        let expected: [ValidationIssue] = [
+            .invalidIP(machine: "c1", ip: "1.2.3.4;"),
+            .emptyIP(machine: "c2"),
+            .reservedMachineName("containers"),
+            .listedTwice("dup"),
+            .reservedMachineName("services"),
+            .invalidServiceName(machine: "Shared services", service: "s.x"),
+            .missingPort(machine: "Shared services", service: "s.x"),
+            .duplicateLocalPort(machine: "Shared services", port: 8080, services: ["a", "b"]),
+        ]
+        #expect(validate(file) == expected)
+        for _ in 0..<20 { #expect(validate(file) == expected) }
+        #expect(ValidationIssue.listedTwice("dup").description.contains("dup"))
+        #expect(ValidationIssue.reservedMachineName("services").description.contains("“services”"))
+    }
+
     @Test func filterIsCaseInsensitiveAndTrimmed() {
         let names = ["prod-eu", "Prod-US", "dev", "staging"]
         #expect(filterMachines(names, query: "  PROD ", recents: []) == ["Prod-US", "prod-eu"])

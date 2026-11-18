@@ -17,25 +17,27 @@ enum Main {
 }
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSPopoverDelegate {
     let model = AppModel()
     let settingsUI = SettingsUI()
+    let panelUI = PanelUI()
     let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     let popover = NSPopover()
     var settingsWindow: NSWindow?
     var hotKey: EventHotKeyRef?
+    private var shownTitle: NSAttributedString?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        let host = NSHostingController(rootView: PanelView(model: model, ui: PanelUI()))
-        host.sizingOptions = .preferredContentSize
-        popover.contentViewController = host
         popover.behavior = .transient
+        popover.delegate = self
         item.button?.target = self
         item.button?.action = #selector(toggle)
         model.onChange = { [weak self] in self?.updateTitle() }
         model.openSettings = { [weak self] tab in self?.showSettings(tab) }
+        model.makeDataFolderPrivate()
         model.reload()
         model.startLoop()
+        model.startUpdateChecks()
         registerHotKey()
         Task {
             await model.refreshSetup()
@@ -46,12 +48,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     @objc func toggle() {
         if popover.isShown { popover.performClose(nil); return }
-        guard let button = item.button else { return }
-        model.reload()
-        model.readLog()
-        popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        showPanel()
         NSApp.activate(ignoringOtherApps: true)
         popover.contentViewController?.view.window?.makeKey()
+    }
+
+    /// The panel's views exist only while it shows: built here, dropped in popoverDidClose. A closed
+    /// panel then costs no memory, and nothing in it (a timer, an observed value) can keep redrawing.
+    private func showPanel() {
+        guard let button = item.button else { return }
+        let host = NSHostingController(rootView: PanelView(model: model, ui: panelUI))
+        host.sizingOptions = .preferredContentSize
+        popover.contentViewController = host
+        model.panelOpened()
+        popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+    }
+
+    func popoverDidClose(_ notification: Notification) {
+        popover.contentViewController = nil
+        model.panelOpen = false
     }
 
     func showSettings(_ tab: SettingsTab) {
@@ -67,7 +82,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             window.center()
             settingsWindow = window
         }
-        if tab == .machines && !settingsUI.machines.hasChanges { settingsUI.machines.load(model.machines) }
+        if tab == .machines && !settingsUI.machines.hasChanges { settingsUI.machines.load(model.machineFile) }
         // A menu bar app has no Dock icon; show one while a window is open so it can be found with ⌘Tab.
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
@@ -76,6 +91,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     func windowWillClose(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
+        // Released rather than kept hidden, like the panel. Its state, unsaved machine edits included,
+        // is in settingsUI, so reopening carries on. After the close: not while AppKit is inside it.
+        Task { settingsWindow = nil }
     }
 
     /// "● aws_machine 7/8": green all up, orange some slow/down, red all down, gray idle.
@@ -95,6 +113,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if model.setupNeedsAttention { dot = .systemRed }
         let title = NSMutableAttributedString(string: "●", attributes: [.foregroundColor: dot, .font: NSFont.systemFont(ofSize: 11)])
         title.append(NSAttributedString(string: text, attributes: [.font: NSFont.menuBarFont(ofSize: 0)]))
+        // Every check ends here; setting the same title again would still make the menu bar redraw
+        guard title != shownTitle else { return }
+        shownTitle = title
         item.button?.attributedTitle = title
         item.button?.setAccessibilityLabel("Loki: \(text.trimmingCharacters(in: .whitespaces))")
     }

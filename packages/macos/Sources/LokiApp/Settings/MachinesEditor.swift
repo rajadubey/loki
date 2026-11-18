@@ -14,7 +14,10 @@ struct MachineDraft: Identifiable, Equatable {
     let id = UUID()
     var name: String
     var ip: String
+    /// Its own services; kept but unused while `shared` is on, so turning it off again loses nothing.
     var services: [ServiceDraft]
+    /// One of machine.json's "containers": it gets the shared services instead of its own.
+    var shared: Bool
     /// Name in machine.json when loaded; nil for a new machine. Used to follow renames of the active machine.
     var originalName: String?
 }
@@ -23,60 +26,99 @@ struct MachineDraft: Identifiable, Equatable {
 @MainActor @Observable
 final class MachinesEditorModel {
     var drafts: [MachineDraft] = []
+    /// machine.json's "services": what every machine with `shared` on gets.
+    var shared: [ServiceDraft] = []
     var selection: UUID?
     var problems: [String] = []
     var message: String?
     private var saved: [MachineDraft] = []
+    private var savedShared: [ServiceDraft] = []
 
-    var hasChanges: Bool { drafts != saved }
+    var hasChanges: Bool { drafts != saved || shared != savedShared }
     var selectedIndex: Int? { drafts.firstIndex { $0.id == selection } }
 
-    func load(_ machines: MachineList) {
-        drafts = machines.keys.sorted().map { name in
-            let m = machines[name]!
-            return MachineDraft(name: name, ip: m.ip,
-                                services: m.services.keys.sorted().map { s in
-                                    ServiceDraft(name: s, local: m.services[s]!.local.map(String.init) ?? "",
-                                                 remote: m.services[s]!.remote.map(String.init) ?? "")
-                                },
-                                originalName: name)
+    /// The selected machine's services: its own, or the shared ones.
+    var selectedServices: [ServiceDraft] {
+        get { selectedIndex.map { drafts[$0].shared ? shared : drafts[$0].services } ?? [] }
+        set {
+            guard let i = selectedIndex else { return }
+            if drafts[i].shared { shared = newValue } else { drafts[i].services = newValue }
         }
+    }
+
+    func load(_ file: MachineFile) {
+        drafts = file.all.sorted { $0.key < $1.key }.map { name, machine in
+            let own = file.machines[name] != nil
+            return MachineDraft(name: name, ip: machine.ip, services: own ? Self.drafts(machine.services) : [],
+                                shared: !own, originalName: name)
+        }
+        shared = Self.drafts(file.services)
         saved = drafts
+        savedShared = shared
         if selectedIndex == nil { selection = drafts.first?.id }
         problems = []
     }
 
-    /// The drafts as a machine list, or the reasons they can't be one.
-    func machineList() -> Result<MachineList, Problems> {
-        var list: MachineList = [:]
+    private static func drafts(_ services: [String: Ports]) -> [ServiceDraft] {
+        services.sorted { $0.key < $1.key }.map { name, p in
+            ServiceDraft(name: name, local: p.local.map(String.init) ?? "", remote: p.remote.map(String.init) ?? "")
+        }
+    }
+
+    /// The drafts as machine.json, or the reasons they can't be.
+    func machineFile() -> Result<MachineFile, Problems> {
         var problems: [String] = []
+        var file = MachineFile(services: Self.services(shared, of: "Shared services", problems: &problems))
         for d in drafts {
             let name = d.name.trimmingCharacters(in: .whitespaces)
-            if list[name] != nil { problems.append("Two machines are called “\(name)”.") }
-            var services: [String: Ports] = [:]
-            for s in d.services {
-                let sname = s.name.trimmingCharacters(in: .whitespaces)
-                if services[sname] != nil { problems.append("\(name): two services are called “\(sname)”.") }
-                let local = Int(s.local.trimmingCharacters(in: .whitespaces))
-                let remote = Int(s.remote.trimmingCharacters(in: .whitespaces))
-                if local == nil && !s.local.isEmpty { problems.append("\(name) → \(sname): local port “\(s.local)” isn't a number.") }
-                if remote == nil && !s.remote.isEmpty { problems.append("\(name) → \(sname): remote port “\(s.remote)” isn't a number.") }
-                services[sname] = Ports(local: local, remote: remote)
+            let ip = d.ip.trimmingCharacters(in: .whitespaces)
+            if file.machines[name] != nil || file.containers[name] != nil {
+                problems.append("Two machines are called “\(name)”.")
+            } else if d.shared {
+                file.containers[name] = ip
+            } else {
+                file.machines[name] = Machine(ip: ip, services: Self.services(d.services, of: name, problems: &problems))
             }
-            list[name] = Machine(ip: d.ip.trimmingCharacters(in: .whitespaces), services: services)
         }
-        problems += validate(list).map(\.description)
-        return problems.isEmpty ? .success(list) : .failure(Problems(list: problems))
+        problems += validate(file).map(\.description)
+        return problems.isEmpty ? .success(file) : .failure(Problems(list: problems))
+    }
+
+    private static func services(_ drafts: [ServiceDraft], of owner: String, problems: inout [String]) -> [String: Ports] {
+        var services: [String: Ports] = [:]
+        for s in drafts {
+            let name = s.name.trimmingCharacters(in: .whitespaces)
+            if services[name] != nil { problems.append("\(owner): two services are called “\(name)”.") }
+            let local = Int(s.local.trimmingCharacters(in: .whitespaces))
+            let remote = Int(s.remote.trimmingCharacters(in: .whitespaces))
+            if local == nil && !s.local.isEmpty { problems.append("\(owner) → \(name): local port “\(s.local)” isn't a number.") }
+            if remote == nil && !s.remote.isEmpty { problems.append("\(owner) → \(name): remote port “\(s.remote)” isn't a number.") }
+            services[name] = Ports(local: local, remote: remote)
+        }
+        return services
     }
 
     struct Problems: Error { let list: [String] }
 
+    /// A new machine gets the shared services when there are some, otherwise a service of its own.
     func addMachine() {
         var n = 1
         while drafts.contains(where: { $0.name == "machine_\(n)" }) { n += 1 }
-        let d = MachineDraft(name: "machine_\(n)", ip: "", services: [ServiceDraft(name: "web", local: "", remote: "")])
+        let d = MachineDraft(name: "machine_\(n)", ip: "",
+                             services: shared.isEmpty ? [ServiceDraft(name: "web", local: "", remote: "")] : [],
+                             shared: !shared.isEmpty, originalName: nil)
         drafts.append(d)
         selection = d.id
+    }
+
+    /// Switches the selected machine between the shared services and its own. Whichever list it
+    /// switches to starts as a copy of the other when empty: the first machine to share its services
+    /// makes them the shared ones, and one leaving the shared services keeps them to edit.
+    func setShared(_ on: Bool) {
+        guard let i = selectedIndex, drafts[i].shared != on else { return }
+        if on && shared.isEmpty { shared = drafts[i].services }
+        if !on && drafts[i].services.isEmpty { drafts[i].services = shared }
+        drafts[i].shared = on
     }
 
     func removeSelected() {
@@ -86,13 +128,11 @@ final class MachinesEditorModel {
     }
 
     func addService() {
-        guard let i = selectedIndex else { return }
-        drafts[i].services.append(ServiceDraft(name: "", local: "", remote: ""))
+        selectedServices.append(ServiceDraft(name: "", local: "", remote: ""))
     }
 
     func removeService(_ id: UUID) {
-        guard let i = selectedIndex else { return }
-        drafts[i].services.removeAll { $0.id == id }
+        selectedServices.removeAll { $0.id == id }
     }
 
     func binding<V>(_ keyPath: WritableKeyPath<MachineDraft, V>, fallback: V) -> Binding<V> {
@@ -107,13 +147,10 @@ final class MachinesEditorModel {
 
     func serviceBinding(_ id: UUID, _ keyPath: WritableKeyPath<ServiceDraft, String>) -> Binding<String> {
         Binding(get: { [weak self] in
-            guard let self, let i = self.selectedIndex,
-                  let s = self.drafts[i].services.first(where: { $0.id == id }) else { return "" }
-            return s[keyPath: keyPath]
+            self?.selectedServices.first { $0.id == id }?[keyPath: keyPath] ?? ""
         }, set: { [weak self] value in
-            guard let self, let i = self.selectedIndex,
-                  let j = self.drafts[i].services.firstIndex(where: { $0.id == id }) else { return }
-            self.drafts[i].services[j][keyPath: keyPath] = value
+            guard let self, let j = self.selectedServices.firstIndex(where: { $0.id == id }) else { return }
+            self.selectedServices[j][keyPath: keyPath] = value
         })
     }
 }
@@ -122,13 +159,13 @@ extension AppModel {
     /// Saves the editor's machines. Follows a rename of the active machine, refuses to delete it
     /// while connected, and reloads nginx when the active machine's services changed.
     func saveMachines(_ editor: MachinesEditorModel) {
-        let list: MachineList
-        switch editor.machineList() {
+        let file: MachineFile
+        switch editor.machineFile() {
         case .failure(let p):
             editor.problems = p.list
             return
-        case .success(let l):
-            list = l
+        case .success(let f):
+            file = f
         }
         editor.problems = []
         let before = machines
@@ -142,16 +179,16 @@ extension AppModel {
             }
         }
         do {
-            try store.save(list)
+            try store.save(file)
             if newActive != active { try store.setActive(newActive) }
         } catch {
             editor.problems = [error.localizedDescription]
             return
         }
         reload()
-        editor.load(list)
+        editor.load(file)
         editor.message = "Saved"
-        if let name = newActive, before[active ?? ""] != list[name] || name != active {
+        if let name = newActive, before[active ?? ""] != file.all[name] || name != active {
             reloadNginx()
         }
     }
@@ -166,8 +203,8 @@ extension AppModel {
             let imported = try store.importMachines(from: url)
             reload()
             editor.load(imported)
-            editor.message = "Imported \(imported.count) machines"
-            if let active, imported[active] != nil { reloadNginx() }
+            editor.message = "Imported \(imported.all.count) machines"
+            if let active, imported.all[active] != nil { reloadNginx() }
         } catch {
             showError(title: "Couldn't import \(url.lastPathComponent)", error)
         }
@@ -196,7 +233,7 @@ struct MachinesEditorView: View {
             Divider()
             bottomBar.padding(12)
         }
-        .onAppear { if !editor.hasChanges { editor.load(model.machines) } }
+        .onAppear { if !editor.hasChanges { editor.load(model.machineFile) } }
     }
 
     private var machineList: some View {
@@ -206,6 +243,10 @@ struct MachinesEditorView: View {
                     HStack {
                         Text(d.name.isEmpty ? "Untitled" : d.name)
                         Spacer()
+                        if d.shared {
+                            Image(systemName: "link").font(.caption).foregroundStyle(.secondary)
+                                .help("Uses the shared services").accessibilityLabel("Uses the shared services")
+                        }
                         if d.originalName != nil && d.originalName == model.active {
                             Image(systemName: "checkmark").font(.caption).foregroundStyle(.secondary)
                                 .accessibilityLabel("Connected")
@@ -231,6 +272,8 @@ struct MachinesEditorView: View {
             Form {
                 TextField("Name", text: editor.binding(\.name, fallback: ""))
                 TextField("IP or host", text: editor.binding(\.ip, fallback: ""), prompt: Text("192.168.1.100"))
+                Toggle("Use shared services", isOn: Binding(get: { editor.selectedIndex.map { editor.drafts[$0].shared } ?? false },
+                                                            set: { editor.setShared($0) }))
                 Section {
                     Grid(alignment: .leading, horizontalSpacing: 8, verticalSpacing: 6) {
                         GridRow {
@@ -239,7 +282,7 @@ struct MachinesEditorView: View {
                             Text("Remote port").font(.caption).foregroundStyle(.secondary)
                             Color.clear.frame(width: 16, height: 1)
                         }
-                        ForEach(editor.drafts[i].services) { s in
+                        ForEach(editor.selectedServices) { s in
                             GridRow {
                                 TextField("Service", text: editor.serviceBinding(s.id, \.name), prompt: Text("user_api"))
                                     .labelsHidden()
@@ -254,9 +297,9 @@ struct MachinesEditorView: View {
                     }
                     Button("Add service") { editor.addService() }
                 } header: {
-                    Text("Services")
+                    Text(editor.drafts[i].shared ? "Shared services" : "Services")
                 } footer: {
-                    Text("nginx listens on the local port and forwards to the remote port on this machine.")
+                    Text(footer(editor.drafts[i]))
                         .font(.caption).foregroundStyle(.secondary)
                 }
             }
@@ -268,6 +311,13 @@ struct MachinesEditorView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+    }
+
+    private func footer(_ d: MachineDraft) -> String {
+        let forward = "nginx listens on the local port and forwards to the remote port on this machine."
+        guard d.shared else { return forward }
+        let users = editor.drafts.filter(\.shared).map { $0.name.isEmpty ? "Untitled" : $0.name }
+        return "\(forward) Every machine using shared services gets these, so changes apply to \(users.joined(separator: ", "))."
     }
 
     private var bottomBar: some View {
@@ -285,7 +335,7 @@ struct MachinesEditorView: View {
                 if let message = editor.message, !editor.hasChanges {
                     Text(message).font(.caption).foregroundStyle(.secondary)
                 }
-                Button("Revert") { editor.load(model.machines) }.disabled(!editor.hasChanges)
+                Button("Revert") { editor.load(model.machineFile) }.disabled(!editor.hasChanges)
                 Button("Save") { model.saveMachines(editor) }
                     .keyboardShortcut("s")
                     .buttonStyle(.borderedProminent)

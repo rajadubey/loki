@@ -72,6 +72,20 @@ final class FakeRunner: CommandRunner, @unchecked Sendable {
     }
 }
 
+/// curl fake: writes `content` to the file named after `-o` and succeeds, like a 200 download.
+func curlWriting(_ content: String) -> FakeRunner.Handler {
+    { _, args in
+        guard let i = args.firstIndex(of: "-o"), i + 1 < args.count else { return FakeRunner.fail("fake curl: no -o") }
+        try? Data(content.utf8).write(to: URL(fileURLWithPath: args[i + 1]))
+        return FakeRunner.ok
+    }
+}
+
+/// Permission bits of a file or folder, e.g. 0o600.
+func mode(_ url: URL) -> Int? {
+    (try? FileManager.default.attributesOfItem(atPath: url.path))?[.posixPermissions] as? Int
+}
+
 /// A fresh directory under the system temp folder, removed (permissions restored first) on deinit.
 /// Keep it in a stored property (e.g. of the test suite) so it outlives the test body.
 final class TempDir: @unchecked Sendable {

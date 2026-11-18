@@ -30,6 +30,15 @@ struct PanelView: View {
                     }
                     .buttonStyle(.plain)
                 }
+                if let update = model.update {
+                    Button { NSWorkspace.shared.open(UpdateCheck.releasesPage) } label: {
+                        Label("Loki \(update) is available: download it", systemImage: "arrow.down.circle.fill")
+                            .font(.caption).foregroundStyle(.blue)
+                            .frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help("Opens the release page with the new DMG")
+                }
                 if let error = model.loadError {
                     Label(error, systemImage: "info.circle").font(.caption).foregroundStyle(.secondary)
                 }
@@ -187,7 +196,7 @@ struct ServicesTab: View {
 
             Divider()
             HStack {
-                Text("Uptime, last hour").font(.caption)
+                Text("Uptime, last \(model.trendSpan)").font(.caption)
                 Spacer()
                 if model.trend.isEmpty {
                     Text("Collecting…").font(.caption).foregroundStyle(.secondary)
@@ -347,9 +356,8 @@ struct PanelFooter: View {
         HStack {
             VStack(alignment: .leading, spacing: 1) {
                 Text("Loki \(model.version)")
-                TimelineView(.periodic(from: .now, by: 1)) { ctx in
-                    Text("Next check in \(max(0, Int(model.nextCheck.timeIntervalSince(ctx.date))))s")
-                }
+                // A time, not a countdown: a countdown redraws every second
+                Text("Next check at \(model.nextCheck.formatted(date: .omitted, time: .standard))")
             }
             .font(.caption).foregroundStyle(.secondary)
             Spacer()

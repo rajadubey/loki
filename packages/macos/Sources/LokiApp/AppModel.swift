@@ -13,6 +13,8 @@ final class AppModel {
     let engine = LokiEngine()
     let assistant = SetupAssistant()
 
+    /// machine.json as written, for the editor; `machines` is every machine with its services.
+    var machineFile = MachineFile()
     var machines: MachineList = [:]
     var active: String?
     var loadError: String?
@@ -29,13 +31,22 @@ final class AppModel {
     var setupChecks: [SetupCheck] = []
     var openAtLogin = SMAppService.mainApp.status == .enabled
     var recents: [String] = UserDefaults.standard.stringArray(forKey: "recents") ?? []
+    /// Seconds between health checks. App-only, so it lives in the app's defaults, not ~/.loki.
+    var interval = TimeInterval(HealthInterval.sanitized(UserDefaults.standard.integer(forKey: "healthInterval")))
+    /// Version of a newer release, when GitHub has one.
+    var update: String?
 
+    /// Whether the menu bar panel shows. Closed, a check probes only the connected machine's services,
+    /// which the menu bar title and notifications need; open, also what only the panel shows: the
+    /// other machines' reachability, HTTP status and whether nginx runs.
+    @ObservationIgnored var panelOpen = false
+    @ObservationIgnored private var lastFullCheck = Date.distantPast
     @ObservationIgnored var onChange: (() -> Void)?
     @ObservationIgnored var openSettings: ((SettingsTab) -> Void)?
     @ObservationIgnored private var notified: Set<String> = []
     @ObservationIgnored private var checking = false
-
-    let interval: TimeInterval = 60
+    @ObservationIgnored private var recheck = false
+    @ObservationIgnored private var loop: Task<Void, Never>?
 
     var store: MachineStore { engine.store }
     var activeMachine: Machine? { active.flatMap { machines[$0] } }
@@ -59,7 +70,8 @@ final class AppModel {
 
     func reload() {
         do {
-            machines = try store.load()
+            machineFile = try store.loadFile()
+            machines = machineFile.all
             loadError = machines.isEmpty ? "No machines yet. Add or sync them in Settings." : nil
         } catch {
             loadError = error.localizedDescription
@@ -76,41 +88,102 @@ final class AppModel {
         logLines = engine.log.tail(50)
     }
 
+    /// The panel opened: fresh files and log, and a full check unless one just ran.
+    func panelOpened() {
+        panelOpen = true
+        reload()
+        readLog()
+        if Date().timeIntervalSince(lastFullCheck) > 15 { Task { await check() } }
+    }
+
     func refreshSetup() async {
         setupChecks = await assistant.inspect()
     }
 
+    /// Older versions (app and CLI) created ~/.loki readable by every user of the Mac.
+    func makeDataFolderPrivate() {
+        do {
+            try engine.paths.makePrivate()
+        } catch {
+            engine.log.append("Couldn't make \(engine.paths.home.path) private (chmod 700 it): \(error.localizedDescription)")
+        }
+    }
+
     // MARK: Health
 
+    /// (Re)starts the check loop; the first check runs right away.
     func startLoop() {
-        Task {
-            while true {
+        loop?.cancel()
+        loop = Task {
+            while !Task.isCancelled {
                 await check()
                 nextCheck = Date().addingTimeInterval(interval)
-                try? await Task.sleep(for: .seconds(interval))
+                try? await Task.sleep(for: .seconds(interval))  // throws when cancelled, which ends the loop
             }
         }
     }
 
+    /// Saves the choice and restarts the loop, so it applies now instead of after the current wait.
+    func setInterval(_ seconds: Int) {
+        let seconds = HealthInterval.sanitized(seconds)
+        guard TimeInterval(seconds) != interval else { return }
+        interval = TimeInterval(seconds)
+        UserDefaults.standard.set(seconds, forKey: "healthInterval")
+        trend = []  // bars from the old interval would misstate the time they cover
+        startLoop()
+    }
+
+    /// What the trend's 60 bars cover: 60 checks × `interval` seconds = `interval` minutes.
+    var trendSpan: String {
+        let minutes = Int(interval)
+        return minutes == 60 ? "hour" : minutes % 60 == 0 ? "\(minutes / 60) hours" : "\(minutes) min"
+    }
+
+    /// One task for the app's lifetime: asks GitHub at launch, then daily, or hourly while it can't be
+    /// reached (at login Wi-Fi often isn't up yet).
+    func startUpdateChecks() {
+        Task {
+            while !Task.isCancelled {
+                let outcome = await UpdateCheck.run(current: version)
+                if case .newer(let latest) = outcome { update = latest }
+                try? await Task.sleep(for: .seconds(outcome == .unreachable ? 3_600 : 86_400))
+            }
+        }
+    }
+
+    /// A check asked for while one runs (after Connect, say) isn't dropped: the running one goes
+    /// again with fresh state, or the old machine's status would stay up until the next interval.
     func check() async {
-        guard !checking else { return }
+        guard !checking else { recheck = true; return }
         checking = true
         defer { checking = false }
-        reload()
-        nginxRunning = await engine.nginx.isRunning()
+        repeat {
+            recheck = false
+            await checkOnce()
+        } while recheck
+    }
 
-        // ponytail: one TCP probe per service per minute; batch if machine.json grows to thousands.
+    private func checkOnce() async {
+        reload()
+        let full = panelOpen
+        if full {
+            lastFullCheck = Date()
+            nginxRunning = await engine.nginx.isRunning()
+        }
+
+        // ponytail: one TCP probe per service per check; batch if machine.json grows to thousands.
         var latency: [String: [String: Int?]] = [:]
-        let all = machines
+        let probed = full ? machines : machines.filter { $0.key == active }
         await withTaskGroup(of: (String, String, Int?).self) { group in
-            for (m, machine) in all {
+            for (m, machine) in probed {
                 for (s, p) in machine.ports {
                     group.addTask { (m, s, await tcpProbe(host: machine.ip, port: p.remote)) }
                 }
             }
             for await (m, s, ms) in group { latency[m, default: [:]][s] = ms }
         }
-        reachable = latency.mapValues { $0.values.contains { $0 != nil } }
+        let seen = latency.mapValues { $0.values.contains { $0 != nil } }
+        reachable = full ? seen : reachable.merging(seen) { $1 }
 
         guard let name = active, let machine = machines[name] else {
             status = [:]
@@ -118,16 +191,19 @@ final class AppModel {
             return
         }
         var http: [String: String] = [:]
-        await withTaskGroup(of: (String, String?).self) { group in
-            for (s, p) in machine.ports { group.addTask { (s, await httpProbe(port: p.local)) } }
-            for await (s, h) in group { http[s] = h }
+        if full {
+            await withTaskGroup(of: (String, String?).self) { group in
+                for (s, p) in machine.ports { group.addTask { (s, await httpProbe(port: p.local)) } }
+                for await (s, h) in group { http[s] = h }
+            }
         }
 
         let now = Date()
         var next: [String: ServiceStatus] = [:]
         for (s, p) in machine.ports {
             let ms = latency[name]?[s] ?? nil
-            next[s] = ServiceStatus(health: classify(ms), latencyMs: ms, http: http[s])
+            // Closed, the last HTTP status stays: only the panel shows it, and opening it checks again
+            next[s] = ServiceStatus(health: classify(ms), latencyMs: ms, http: full ? http[s] : status[s]?.http)
             let key = "\(name)/\(s)"
             if ms == nil {
                 let since = downSince[key] ?? now

@@ -139,11 +139,12 @@ public struct SetupAssistant: Sendable {
 
     func machinesCheck() -> SetupCheck {
         do {
-            let machines = try MachineStore(paths: paths).load()
+            let file = try MachineStore(paths: paths).loadFile()
+            let machines = file.all
             if machines.isEmpty {
                 return SetupCheck(.machines, .warning, "No machines yet", "Sync them from your team's host or add them yourself.", fix: .openMachines)
             }
-            let issues = validate(machines)
+            let issues = validate(file)
             if !issues.isEmpty {
                 return SetupCheck(.machines, .warning, "machine.json has \(issues.count) problem\(issues.count == 1 ? "" : "s")",
                                   issues.first!.description, fix: .openMachines)
@@ -156,10 +157,17 @@ public struct SetupAssistant: Sendable {
 
     func syncCheck() -> SetupCheck {
         let settings = SyncSettings.load(from: paths)
-        if settings.isConfigured {
-            return SetupCheck(.sync, .ok, "Sync from \(settings.user)@\(settings.host)", settings.remotePath)
+        guard settings.isConfigured else {
+            return SetupCheck(.sync, .warning, "Sync isn't set up", "Optional: fetch machine.json over SSH or from a URL such as a gist.", fix: .openSync)
         }
-        return SetupCheck(.sync, .warning, "Sync isn't set up", "Optional: fetch machine.json from a shared host over SSH.", fix: .openSync)
+        // The problems text never repeats a URL, so a password in one isn't shown here
+        guard settings.problems.isEmpty else {
+            return SetupCheck(.sync, .warning, "Sync can't run", settings.problems.joined(separator: " "), fix: .openSync)
+        }
+        if settings.usesURL {
+            return SetupCheck(.sync, .ok, "Sync from \(URLComponents(string: settings.url)?.host ?? "a URL")", settings.source)
+        }
+        return SetupCheck(.sync, .ok, "Sync from \(settings.user)@\(settings.host)", settings.remotePath)
     }
 
     // MARK: Fixes

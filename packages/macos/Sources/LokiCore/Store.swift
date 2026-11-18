@@ -1,6 +1,8 @@
 import Foundation
 
 /// Locations inside the loki home folder (~/.loki), shared with the CLI.
+/// It holds machine addresses and sync settings (a sync URL may carry a token), so like ~/.ssh the
+/// folder is owner-only (0700) and every file loki writes in it is too (0600). The CLI does the same.
 public struct LokiPaths: Sendable, Equatable {
     public let home: URL
 
@@ -15,6 +17,28 @@ public struct LokiPaths: Sendable, Equatable {
     public var log: URL { home.appending(path: "loki.log") }
     /// Shell-style settings file the CLI sources (`LOKI_SSH_HOST='...'`).
     public var config: URL { home.appending(path: "config") }
+
+    /// Creates the folder owner-only when it's missing. Writes call this; it leaves an existing folder
+    /// alone, so a refused chmod (a network home, say) can't stop machines from saving.
+    public func ensurePrivateHome() throws {
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+    }
+
+    /// Makes the folder owner-only (older versions left it readable by everyone), like the CLI's
+    /// `chmod 700` on every run; the app runs this at launch. Only the folder, which already keeps
+    /// other users away from every file in it: changing a file's mode would quietly "fix" a
+    /// world-writable config the CLI must refuse to run.
+    public func makePrivate() throws {
+        try ensurePrivateHome()
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: home.resolvingSymlinksInPath().path)
+    }
+}
+
+/// Atomic write, then owner-only permissions (0600). Inside the 0700 home nobody else can
+/// reach the file even before the chmod; the 0600 keeps it private if it's copied out.
+func writePrivately(_ data: Data, to url: URL) throws {
+    try data.write(to: url, options: .atomic)
+    try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
 }
 
 public enum StoreError: Error, LocalizedError, Equatable {
@@ -37,35 +61,41 @@ public struct MachineStore: Sendable {
         self.paths = paths
     }
 
-    /// The machine list, or an empty list when machine.json doesn't exist yet.
+    /// Every machine, containers expanded, or none when machine.json doesn't exist yet.
     public func load() throws -> MachineList {
-        guard FileManager.default.fileExists(atPath: paths.machines.path) else { return [:] }
-        return try decode(Data(contentsOf: paths.machines), source: "machine.json")
+        try loadFile().all
     }
 
-    /// Validates, backs up the previous file to machine.json.bak, then writes atomically.
-    public func save(_ machines: MachineList) throws {
-        let issues = validate(machines)
+    /// machine.json as written, or an empty one when it doesn't exist yet.
+    public func loadFile() throws -> MachineFile {
+        guard FileManager.default.fileExists(atPath: paths.machines.path) else { return MachineFile() }
+        return try Self.decode(Data(contentsOf: paths.machines), source: "machine.json")
+    }
+
+    /// Validates, backs up the previous file to machine.json.bak, then writes atomically (both 0600).
+    public func save(_ file: MachineFile) throws {
+        let issues = validate(file)
         guard issues.isEmpty else { throw StoreError.invalid(issues) }
-        try ensureHome()
+        try paths.ensurePrivateHome()
         let fm = FileManager.default
         if fm.fileExists(atPath: paths.machines.path) {
             let backup = paths.home.appending(path: "machine.json.bak")
             try? fm.removeItem(at: backup)
             try fm.copyItem(at: paths.machines, to: backup)
+            try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: backup.path)
         }
-        try Self.encode(machines).write(to: paths.machines, options: .atomic)
+        try writePrivately(Self.encode(file), to: paths.machines)
     }
 
     /// Reads a machine.json from anywhere; throws if it isn't valid JSON or fails validation.
-    public func importMachines(from url: URL) throws -> MachineList {
-        let machines = try decode(Data(contentsOf: url), source: url.lastPathComponent)
-        try save(machines)
-        return machines
+    public func importMachines(from url: URL) throws -> MachineFile {
+        let file = try Self.decode(Data(contentsOf: url), source: url.lastPathComponent)
+        try save(file)
+        return file
     }
 
     public func exportMachines(to url: URL) throws {
-        try Self.encode(try load()).write(to: url, options: .atomic)
+        try Self.encode(try loadFile()).write(to: url, options: .atomic)
     }
 
     public func activeName() -> String? {
@@ -77,8 +107,8 @@ public struct MachineStore: Sendable {
     /// Writes (or with nil, removes) ~/.loki/active, in the CLI's format (name + newline).
     public func setActive(_ name: String?) throws {
         if let name {
-            try ensureHome()
-            try Data((name + "\n").utf8).write(to: paths.active, options: .atomic)
+            try paths.ensurePrivateHome()
+            try writePrivately(Data((name + "\n").utf8), to: paths.active)
         } else if FileManager.default.fileExists(atPath: paths.active.path) {
             try FileManager.default.removeItem(at: paths.active)
         }
@@ -88,22 +118,18 @@ public struct MachineStore: Sendable {
         (try? FileManager.default.attributesOfItem(atPath: url.path))?[.modificationDate] as? Date
     }
 
-    func ensureHome() throws {
-        try FileManager.default.createDirectory(at: paths.home, withIntermediateDirectories: true)
-    }
-
-    func decode(_ data: Data, source: String) throws -> MachineList {
+    static func decode(_ data: Data, source: String) throws -> MachineFile {
         do {
-            return try JSONDecoder().decode(MachineList.self, from: data)
+            return try JSONDecoder().decode(MachineFile.self, from: data)
         } catch {
             throw StoreError.unreadable("\(source) isn't a valid machine list: \(Self.describe(error))")
         }
     }
 
-    static func encode(_ machines: MachineList) throws -> Data {
+    static func encode(_ file: MachineFile) throws -> Data {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
-        return try encoder.encode(machines)
+        return try encoder.encode(file)
     }
 
     static func describe(_ error: Error) -> String {
@@ -132,19 +158,33 @@ public struct LokiLog: Sendable {
         self.url = url
     }
 
+    /// Past this size the log moves to loki.log.1 (replacing the previous one), as the CLI does.
+    public static let maxBytes = 1_000_000
+
     public func append(_ message: String, date: Date = Date()) {
         // Every line gets the prefix, including each line of multi-line nginx output (as the CLI does)
         let stamp = "[\(Self.timestamp(date))] "
         let line = message.split(separator: "\n", omittingEmptySubsequences: false)
             .map { stamp + $0 }.joined(separator: "\n") + "\n"
-        if let handle = try? FileHandle(forWritingTo: url) {
-            defer { try? handle.close() }
-            _ = try? handle.seekToEnd()
-            try? handle.write(contentsOf: Data(line.utf8))
-        } else {
-            try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-            try? Data(line.utf8).write(to: url)
-        }
+        rotateIfFull()
+        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true,
+                                                 attributes: [.posixPermissions: 0o700])
+        // O_APPEND appends atomically next to the CLI's `>>`; O_CREAT makes a new log owner-only.
+        // An existing log is never replaced, even one we can't write to (we just skip the line).
+        let fd = open(url.path, O_WRONLY | O_APPEND | O_CREAT, 0o600)
+        guard fd >= 0 else { return }
+        defer { close(fd) }
+        let bytes = Array(line.utf8)
+        _ = bytes.withUnsafeBufferPointer { write(fd, $0.baseAddress, $0.count) }
+    }
+
+    /// Keeps the log bounded: once it's over `maxBytes` it becomes loki.log.1 and a new one starts.
+    func rotateIfFull() {
+        let fm = FileManager.default
+        guard let size = (try? fm.attributesOfItem(atPath: url.path))?[.size] as? Int, size > Self.maxBytes else { return }
+        let previous = url.appendingPathExtension("1")
+        try? fm.removeItem(at: previous)
+        try? fm.moveItem(at: url, to: previous)
     }
 
     /// Last `count` lines from the final 64 KB of the log.

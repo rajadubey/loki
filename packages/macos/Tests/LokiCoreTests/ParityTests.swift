@@ -73,6 +73,13 @@ final class ParitySandbox: @unchecked Sendable {
             for a; do src=$dst; dst=$a; done
             cp "${src#*:}" "$dst"
             """,
+            // curl [opts] -K <config or - for stdin> -o dest -> cp <root>/download.json dest; the config to curl.config
+            "curl": """
+            echo "$*" >> '\(r)/curl.calls'
+            for a; do [ "$prev" = -o ] && out=$a; [ "$prev" = -K ] && cfg=$a; prev=$a; done
+            if [ "$cfg" = - ]; then cat; else cat "$cfg"; fi >> '\(r)/curl.config'
+            cp '\(r)/download.json' "$out"
+            """,
         ]
         for (name, body) in fakes {
             let url = bin.appending(path: name)
@@ -83,7 +90,8 @@ final class ParitySandbox: @unchecked Sendable {
         paths = LokiPaths(home: root.appending(path: "home/.loki"))
         engine = LokiEngine(paths: paths, runner: ProcessRunner(path: path))
         // Blank any LOKI_* settings leaking in from the developer's shell.
-        let clean = ["BASH_ENV": "", "LOKI_SSH_USER": "", "LOKI_SSH_HOST": "", "LOKI_SSH_PORT": "", "LOKI_REMOTE_MACHINES_JSON": ""]
+        let clean = ["BASH_ENV": "", "LOKI_SSH_USER": "", "LOKI_SSH_HOST": "", "LOKI_SSH_PORT": "", "LOKI_REMOTE_MACHINES_JSON": "",
+                     "LOKI_SYNC_URL": ""]
         shell = ProcessRunner(path: path, environment: clean)
         cliRunner = ProcessRunner(path: path, environment: clean.merging(["HOME": root.appending(path: "home").path]) { $1 })
         if let json { try writeMachines(json) }
@@ -104,7 +112,7 @@ final class ParitySandbox: @unchecked Sendable {
 
     func mark(_ marker: String) { FileManager.default.createFile(atPath: root.appending(path: marker).path, contents: nil) }
 
-    /// Argument lines a fake tool was called with ("nginx" or "scp").
+    /// Argument lines a fake tool was called with ("nginx", "scp" or "curl").
     func calls(_ tool: String) -> [String] {
         (Self.read(root.appending(path: "\(tool).calls")) ?? "").split(separator: "\n").map(String.init)
     }
@@ -128,6 +136,13 @@ private struct Fixture: Sendable, CustomTestStringConvertible {
 }
 
 /// Every fixture has a machine "dev"; most also have "prod".
+/// dev and prod get the shared services; solo has its own.
+private let containersJSON = """
+{"containers": {"dev": "10.1.2.6", "prod": "10.0.0.9"},
+ "services": {"web": {"local": 8080, "remote": 80}, "db": {"local": 5432, "remote": 5432}},
+ "solo": {"ip": "10.3.3.3", "services": {"ssh": {"local": 2222, "remote": 22}}}}
+"""
+
 private let fixtures: [Fixture] = [
     Fixture(name: "multiple services", json: """
     {"prod": {"ip": "10.0.0.9", "services": {"web": {"local": 8081, "remote": 80}}},
@@ -153,6 +168,21 @@ private let fixtures: [Fixture] = [
     """),
     Fixture(name: "zero services", json: """
     {"dev": {"ip": "10.1.2.4", "services": {}}, "prod": {"ip": "10.0.0.9", "services": {"web": {"local": 8081, "remote": 80}}}}
+    """),
+    // jq 1.7 keeps number literals as written; both must still write whole numbers for nginx
+    Fixture(name: "ports written as decimals", json: """
+    {"dev": {"ip": "10.1.2.5", "services": {"web": {"local": 8080.0, "remote": 1e2}}},
+     "prod": {"ip": "10.0.0.9", "services": {"web": {"local": 8081, "remote": 80}}}}
+    """),
+    Fixture(name: "containers share services", json: containersJSON),
+    Fixture(name: "a machine of its own next to containers", json: """
+    {"containers": {"prod": "10.0.0.9"}, "services": {"web": {"local": 8081, "remote": 80}},
+     "dev": {"ip": "10.1.2.7", "services": {"api": {"local": 9000, "remote": 3000}}}}
+    """),
+    Fixture(name: "a machine of its own wins over a container of the same name", json: """
+    {"containers": {"dev": "10.9.9.9"}, "services": {"web": {"local": 8080, "remote": 80}},
+     "dev": {"ip": "10.1.2.8", "services": {"ssh": {"local": 2222, "remote": 22}}},
+     "prod": {"ip": "10.0.0.9", "services": {"web": {"local": 8081, "remote": 80}}}}
     """),
 ]
 
@@ -314,22 +344,47 @@ struct ParityTests {
 
     @Test func machinesSavedBySwiftWorkInTheCLI() async throws {
         let cli = try ParitySandbox()
-        let machines: MachineList = [
-            "zeta": Machine(ip: "10.9.9.9", services: [:]),
-            "alpha": Machine(ip: "10.0.0.1", services: ["web": Ports(local: 8080, remote: 80), "db": Ports(local: 5432, remote: 5432)]),
-            "mid.box-1": Machine(ip: "host.example", services: ["ssh": Ports(local: 2222, remote: 22)]),
-        ]
-        try MachineStore(paths: cli.paths).save(machines)
+        let file = MachineFile(
+            machines: [
+                "zeta": Machine(ip: "10.9.9.9", services: [:]),
+                "alpha": Machine(ip: "10.0.0.1", services: ["web": Ports(local: 8080, remote: 80), "db": Ports(local: 5432, remote: 5432)]),
+                "mid.box-1": Machine(ip: "host.example", services: ["ssh": Ports(local: 2222, remote: 22)]),
+            ],
+            containers: ["box-2": "10.2.2.2"],
+            services: ["api": Ports(local: 9000, remote: 3000)]
+        )
+        try MachineStore(paths: cli.paths).save(file)
 
         let list = await cli.cli("list")
         #expect(list.succeeded, "\(list.output)")
-        #expect(list.output == "Available machines:\n  - alpha\n  - mid.box-1\n  - zeta\n")
+        #expect(list.output == "Available machines:\n  - alpha\n  - box-2\n  - mid.box-1\n  - zeta\n")
 
-        let r = await cli.cli("connect", "alpha")
+        for name in ["alpha", "box-2"] {
+            let r = await cli.cli("connect", name)
+            #expect(r.succeeded, "\(r.output)")
+            let expected = NginxConfig.render(machineName: name, machine: file.all[name]!)
+            #expect(ParitySandbox.normalized(cli.installed) == ParitySandbox.normalized(expected))
+            #expect(await cli.cli("list").output.contains("  * \(name)\n"))
+        }
+    }
+
+    @Test func aFileWithContainersSyncsTheSameInBoth() async throws {
+        let (cli, app) = try twins(fixtures[0].json)
+        await cli.cli("connect", "dev")
+        try await app.engine.connect("dev")
+        for box in [cli, app] { try Data(containersJSON.utf8).write(to: box.root.appending(path: "download.json")) }
+        let settings = SyncSettings(url: "https://example.com/machine.json")
+        try settings.save(to: cli.paths)
+
+        let r = await cli.cli("sync")
         #expect(r.succeeded, "\(r.output)")
-        let expected = NginxConfig.render(machineName: "alpha", machine: machines["alpha"]!)
-        #expect(ParitySandbox.normalized(cli.installed) == ParitySandbox.normalized(expected))
-        #expect(await cli.cli("list").output.contains("  * alpha\n"))
+        try await app.engine.sync(settings)
+
+        expectSameState(cli, app)
+        #expect(app.installed?.contains("server 10.1.2.6:5432;") == true, "dev reloaded as a container")
+        let saved = try MachineStore(paths: app.paths).loadFile()
+        #expect(try MachineStore(paths: cli.paths).loadFile() == saved)
+        #expect(saved.containers == ["dev": "10.1.2.6", "prod": "10.0.0.9"])
     }
 
     @Test func syncFetchesAndReloadsTheSameWayInBoth() async throws {
@@ -376,17 +431,96 @@ struct ParityTests {
         }
     }
 
+    @Test func syncFromAURLWorksTheSameInBoth() async throws {
+        let (cli, app) = try twins(fixtures[0].json)
+        await cli.cli("connect", "dev")
+        try await app.engine.connect("dev")
+        for box in [cli, app] { try Data(fixtures[3].json.utf8).write(to: box.root.appending(path: "download.json")) }
+        let settings = SyncSettings(host: "ignored", url: "https://gist.githubusercontent.com/u/abc/raw/machine.json?token=t0k3n")
+        try settings.save(to: cli.paths)
+
+        let r = await cli.cli("sync")
+        #expect(r.succeeded, "\(r.output)")
+        try await app.engine.sync(settings)
+
+        expectSameState(cli, app)
+        #expect(app.installed?.contains("upstream ssh") == true)
+        #expect(try MachineStore(paths: cli.paths).load() == MachineStore(paths: app.paths).load())
+        let flags = " -fsSL --proto =https --proto-redir =https --max-filesize 1000000 --max-time 30 -o "
+        for box in [cli, app] {
+            let call = box.calls("curl").last ?? ""
+            #expect(call.hasPrefix("-q -K ") && call.contains(flags), "\(call)")
+            #expect(!call.contains("gist"), "the URL stays off curl's command line, where ps shows it: \(call)")
+            #expect(ParitySandbox.read(box.root.appending(path: "curl.config"))?
+                .contains(#"url = "https://gist.githubusercontent.com/u/abc/raw/machine.json?token=t0k3n""#) == true)
+            #expect(box.calls("scp").isEmpty)
+            let log = ParitySandbox.read(box.paths.log) ?? ""
+            #expect(log.contains("] Fetching machines.json from https://gist.githubusercontent.com/u/abc/raw/machine.json ...\n"), "\(log)")
+            #expect(!log.contains("t0k3n"))
+        }
+    }
+
+    @Test(arguments: SecurityTests.unsafeDownloads)
+    func bothRejectTheSameUnsafeDownloads(_ download: String) async throws {
+        let (cli, app) = try twins(fixtures[0].json)
+        let before = try Data(contentsOf: cli.paths.machines)
+        let settings = SyncSettings(url: "https://example.com/machine.json")
+        try settings.save(to: cli.paths)
+        for box in [cli, app] { try Data(download.utf8).write(to: box.root.appending(path: "download.json")) }
+
+        let r = await cli.cli("sync")
+        #expect(!r.succeeded && r.output.contains("rejected"), "the CLI accepted it: \(r.output)")
+        await #expect(throws: SyncError.self) { try await app.engine.sync(settings) }
+        for box in [cli, app] {
+            #expect(try Data(contentsOf: box.paths.machines) == before)
+            #expect(box.calls("nginx").isEmpty)
+        }
+    }
+
+    @Test func bothMakeAWorldReadableDataFolderPrivate() async throws {
+        let (cli, app) = try twins(fixtures[0].json)
+        for box in [cli, app] {  // as older versions left it
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: box.paths.home.path)
+        }
+        #expect(await cli.cli("status").succeeded)  // any CLI run
+        try app.paths.makePrivate()                  // what the app does at launch
+        for box in [cli, app] { #expect(mode(box.paths.home) == 0o700) }
+    }
+
+    @Test func bothKeepAnUncheckedIPInsideTheDisconnectComment() async throws {
+        let hostile = #"{"dev": {"ip": "10.0.0.1\nserver { listen 2222; proxy_pass 10.9.9.9:22; } #", "services": {}}}"#
+        let (cli, app) = try twins(hostile)
+        for box in [cli, app] { try MachineStore(paths: box.paths).setActive("dev") }
+        let r = await cli.cli("disconnect")
+        #expect(r.succeeded, "\(r.output)")
+        try await app.engine.disconnect()
+        expectSameState(cli, app)
+        #expect(app.installed?.split(separator: "\n").count == 1, "\(app.installed ?? "")")
+    }
+
+    @Test func aDuplicateMachineCantGetItsHostileCopyToTheAppThroughTheCLI() async throws {
+        // jq keeps the last copy, the app the first: the CLI must save what it checked, not the download
+        let cli = try ParitySandbox(machines: fixtures[0].json)
+        let download = #"{"dev": {"ip": "1.2.3.4\nserver { listen 4444; }", "services": {}}, "dev": {"ip": "10.0.0.1", "services": {}}}"#
+        try Data(download.utf8).write(to: cli.root.appending(path: "download.json"))
+        try SyncSettings(url: "https://example.com/machine.json").save(to: cli.paths)
+        let r = await cli.cli("sync")
+        #expect(r.succeeded, "\(r.output)")
+        #expect(try MachineStore(paths: cli.paths).load() == ["dev": Machine(ip: "10.0.0.1", services: [:])])
+    }
+
     // MARK: ~/.loki/config
 
     @Test(arguments: [
         SyncSettings(user: "root", host: "build.example.com", port: 22, remotePath: "/mnt/machines.json"),
         SyncSettings(user: "deploy", host: "10.0.0.7", port: 2222, remotePath: "/srv/with space/machines.json"),
         SyncSettings(user: "o'brien", host: "my host", port: 65535, remotePath: "/it's/a \"quoted\" $HOME `x` path.json"),
+        SyncSettings(host: "h", url: "https://gist.githubusercontent.com/u/abc/raw/machine.json?token=it's$HOME"),
     ])
     func configWrittenBySwiftIsSourcedByTheCLI(_ settings: SyncSettings) async throws {
         let box = try ParitySandbox()
         try settings.save(to: box.paths)
-        #expect(try await sourced(box, box.paths.config) == [settings.user, settings.host, String(settings.port), settings.remotePath])
+        #expect(try await sourced(box, box.paths.config) == [settings.user, settings.host, String(settings.port), settings.remotePath, settings.url])
         #expect(SyncSettings.load(from: box.paths) == settings)
     }
 
@@ -400,12 +534,13 @@ struct ParityTests {
         "LOKI_SSH_HOST=first\nLOKI_SSH_HOST=second",
         "LOKI_SSH_USER=\"\"\nLOKI_SSH_PORT=\nLOKI_SSH_HOST=h",
         "  export   LOKI_SSH_HOST=indented",
+        #"export LOKI_SYNC_URL="https://example.com/m.json?a=1&b=2""#,
     ])
     func handWrittenConfigParsesLikeBash(_ text: String) async throws {
         let box = try ParitySandbox()
         try Data(text.utf8).write(to: box.paths.config)
         let s = SyncSettings.parse(text)
-        #expect(try await sourced(box, box.paths.config) == [s.user, s.host, String(s.port), s.remotePath])
+        #expect(try await sourced(box, box.paths.config) == [s.user, s.host, String(s.port), s.remotePath, s.url])
     }
 
     @Test func handWrittenConfigWithVariablesParsesLikeBash() async throws {
@@ -419,11 +554,11 @@ struct ParityTests {
         }
     }
 
-    /// The four values loki.sh's cmd_sync would use after sourcing `config`, with its defaults.
+    /// The values loki.sh's cmd_sync would use after sourcing `config`, with its defaults.
     private func sourced(_ box: ParitySandbox, _ config: URL) async throws -> [String] {
         let script = #"""
             . "$1"
-            printf '%s\n' "${LOKI_SSH_USER:-root}" "$LOKI_SSH_HOST" "${LOKI_SSH_PORT:-22}" "${LOKI_REMOTE_MACHINES_JSON:-/mnt/machines.json}"
+            printf '%s\n' "${LOKI_SSH_USER:-root}" "$LOKI_SSH_HOST" "${LOKI_SSH_PORT:-22}" "${LOKI_REMOTE_MACHINES_JSON:-/mnt/machines.json}" "${LOKI_SYNC_URL:-}"
             """#
         let r = await box.shell.run("/bin/bash", ["-c", script, "bash", config.path])
         try #require(r.succeeded, "\(r.output)")

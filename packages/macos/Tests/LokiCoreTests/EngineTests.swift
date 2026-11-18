@@ -32,7 +32,7 @@ private let machinesJSON = #"""
         #expect(tmp.read(".loki/active") == "dev\n")
         let conf = try #require(installed)
         #expect(conf.hasPrefix("# Auto-generated remote.conf for dev (10.0.0.5) ["))
-        #expect(conf.contains("upstream db {\n    server 10.0.0.5:5432;\n}\nserver {\n    listen 5433;\n    proxy_pass db;\n}\n"))
+        #expect(conf.contains("upstream db {\n    server 10.0.0.5:5432;\n}\nserver {\n    listen 127.0.0.1:5433;\n    proxy_pass db;\n}\n"))
         #expect(conf.contains("upstream web {\n    server 10.0.0.5:80;\n}"))
         #expect(tmp.read(".loki/remote.conf") == conf)  // copy kept for inspection, like the CLI's TMP_CONF
         #expect(runner.calls.last == ["nginx", "-s", "reload"])

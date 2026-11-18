@@ -36,12 +36,12 @@ private func localDate(_ y: Int, _ mo: Int, _ d: Int, _ h: Int, _ mi: Int, _ s: 
     }
 
     @Test func saveThenLoadRoundTrips() throws {
-        try store.save(sample)
+        try store.save(MachineFile(machines: sample))
         #expect(try store.load() == sample)
     }
 
     @Test func saveWritesSortedPrettyJSON() throws {
-        try store.save(sample)
+        try store.save(MachineFile(machines: sample))
         let text = try #require(tmp.read(".loki/machine.json"))
         #expect(text.contains("\n  "))  // pretty printed
         let order = ["\"alpha\"", "\"db\"", "\"ssh\"", "\"zulu\""].map { text.range(of: $0)!.lowerBound }
@@ -53,20 +53,20 @@ private func localDate(_ y: Int, _ mo: Int, _ d: Int, _ h: Int, _ mi: Int, _ s: 
     }
 
     @Test func saveIsDeterministic() throws {
-        try store.save(sample)
+        try store.save(MachineFile(machines: sample))
         let first = try Data(contentsOf: paths.machines)
-        try store.save(sample)
+        try store.save(MachineFile(machines: sample))
         #expect(try Data(contentsOf: paths.machines) == first)
     }
 
     @Test func saveKeepsPreviousFileAsBak() throws {
-        try store.save(sample)
+        try store.save(MachineFile(machines: sample))
         #expect(!tmp.exists(".loki/machine.json.bak"))
         let first = try #require(tmp.read(".loki/machine.json"))
-        try store.save(["only": Machine(ip: "1.1.1.1", services: [:])])
+        try store.save(MachineFile(machines: ["only": Machine(ip: "1.1.1.1", services: [:])]))
         #expect(tmp.read(".loki/machine.json.bak") == first)
         let second = try #require(tmp.read(".loki/machine.json"))
-        try store.save(sample)
+        try store.save(MachineFile(machines: sample))
         #expect(tmp.read(".loki/machine.json.bak") == second)  // replaced, not appended
     }
 
@@ -75,7 +75,7 @@ private func localDate(_ y: Int, _ mo: Int, _ d: Int, _ h: Int, _ mi: Int, _ s: 
         try tmp.write(".loki/machine.json", original)
         let bad: MachineList = ["m": Machine(ip: "1.2.3.4;", services: ["a": Ports(local: nil, remote: 1)])]
         #expect(throws: StoreError.invalid([.invalidIP(machine: "m", ip: "1.2.3.4;"), .missingPort(machine: "m", service: "a")])) {
-            try store.save(bad)
+            try store.save(MachineFile(machines: bad))
         }
         #expect(tmp.read(".loki/machine.json") == original)
         #expect(!tmp.exists(".loki/machine.json.bak"))
@@ -104,16 +104,16 @@ private func localDate(_ y: Int, _ mo: Int, _ d: Int, _ h: Int, _ mi: Int, _ s: 
     }
 
     @Test func importSavesValidFile() throws {
-        try store.save(["old": Machine(ip: "9.9.9.9", services: [:])])
+        try store.save(MachineFile(machines: ["old": Machine(ip: "9.9.9.9", services: [:])]))
         let source = try tmp.write("in/team.json", #"{"new":{"ip":"1.2.3.4","services":{"web":{"local":8080,"remote":80}}}}"#)
         let imported = try store.importMachines(from: source)
-        #expect(imported == ["new": Machine(ip: "1.2.3.4", services: ["web": Ports(local: 8080, remote: 80)])])
-        #expect(try store.load() == imported)
+        #expect(imported == MachineFile(machines: ["new": Machine(ip: "1.2.3.4", services: ["web": Ports(local: 8080, remote: 80)])]))
+        #expect(try store.loadFile() == imported)
         #expect(tmp.read(".loki/machine.json.bak")?.contains("old") == true)
     }
 
     @Test func importRejectsBadJSONAndInvalidLists() throws {
-        try store.save(sample)
+        try store.save(MachineFile(machines: sample))
         let before = try Data(contentsOf: paths.machines)
         let garbage = try tmp.write("in/bad.json", "[1,2,3]")
         #expect(throws: StoreError.self) { try store.importMachines(from: garbage) }
@@ -122,8 +122,25 @@ private func localDate(_ y: Int, _ mo: Int, _ d: Int, _ h: Int, _ mi: Int, _ s: 
         #expect(try Data(contentsOf: paths.machines) == before)
     }
 
+    @Test func containersAndSharedServicesAreSavedAsWritten() throws {
+        let file = MachineFile(machines: ["solo": Machine(ip: "10.0.2.1", services: ["ssh": Ports(local: 2222, remote: 22)])],
+                               containers: ["c1": "10.0.1.1", "c2": "10.0.1.2"],
+                               services: ["web": Ports(local: 8080, remote: 80)])
+        try store.save(file)
+        #expect(try store.loadFile() == file)
+        #expect(try store.load() == file.all)
+        let top = try #require(JSONSerialization.jsonObject(with: Data(contentsOf: paths.machines)) as? [String: Any])
+        #expect(Set(top.keys) == ["containers", "services", "solo"])
+    }
+
+    @Test func aFileWithoutContainersIsSavedWithoutThem() throws {
+        try store.save(MachineFile(machines: sample))
+        let top = try #require(JSONSerialization.jsonObject(with: Data(contentsOf: paths.machines)) as? [String: Any])
+        #expect(Set(top.keys) == ["alpha", "zulu"])
+    }
+
     @Test func exportWritesTheSameJSONAsSave() throws {
-        try store.save(sample)
+        try store.save(MachineFile(machines: sample))
         let out = tmp.path("out.json")
         try store.exportMachines(to: out)
         #expect(try Data(contentsOf: out) == Data(contentsOf: paths.machines))
@@ -149,7 +166,7 @@ private func localDate(_ y: Int, _ mo: Int, _ d: Int, _ h: Int, _ mi: Int, _ s: 
 
     @Test func modifiedDate() throws {
         #expect(store.modified(paths.machines) == nil)
-        try store.save(sample)
+        try store.save(MachineFile(machines: sample))
         let date = try #require(store.modified(paths.machines))
         #expect(abs(date.timeIntervalSinceNow) < 60)
     }

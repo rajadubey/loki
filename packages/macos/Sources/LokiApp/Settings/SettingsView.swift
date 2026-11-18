@@ -35,6 +35,10 @@ struct SettingsView: View {
 
 @MainActor @Observable
 final class SyncForm {
+    enum Source: String, CaseIterable { case url = "From a URL", ssh = "Over SSH" }
+
+    var source = Source.ssh
+    var url = ""
     var user = ""
     var host = ""
     var port = ""
@@ -42,13 +46,22 @@ final class SyncForm {
     var status: (text: String, ok: Bool)?
     var busy = false
 
+    /// Picking SSH saves an empty URL, which is what switches the CLI back to SSH too.
     var settings: SyncSettings {
         SyncSettings(user: user.trimmingCharacters(in: .whitespaces), host: host.trimmingCharacters(in: .whitespaces),
                      port: Int(port.trimmingCharacters(in: .whitespaces)) ?? 0,
-                     remotePath: remotePath.trimmingCharacters(in: .whitespaces))
+                     remotePath: remotePath.trimmingCharacters(in: .whitespaces),
+                     url: source == .url ? url.trimmingCharacters(in: .whitespacesAndNewlines) : "")
+    }
+
+    /// The form's rule first: "From a URL" with an empty field must not quietly become SSH.
+    var problems: [String] {
+        source == .url && settings.url.isEmpty ? ["Enter the URL."] : settings.problems
     }
 
     func load(_ s: SyncSettings) {
+        source = s.usesURL ? .url : .ssh
+        url = s.url
         user = s.user
         host = s.host
         port = String(s.port)
@@ -74,16 +87,32 @@ struct SyncSettingsView: View {
 
     var body: some View {
         Form {
-            Section {
-                TextField("Host", text: Binding(form, \.host), prompt: Text("54.123.45.67"))
-                TextField("User", text: Binding(form, \.user), prompt: Text("ubuntu"))
-                TextField("Port", text: Binding(form, \.port), prompt: Text("22"))
-                TextField("machines.json path", text: Binding(form, \.remotePath), prompt: Text("/opt/machines.json"))
-            } header: {
-                Text("Fetch machine.json over SSH")
-            } footer: {
-                Text("Uses your SSH keys without prompting, so the host must accept key login and already be in ~/.ssh/known_hosts. Saved to ~/.loki/config, which the loki CLI reads too.")
-                    .font(.caption).foregroundStyle(.secondary)
+            Picker("Fetch machine.json", selection: Binding(form, \.source)) {
+                ForEach(SyncForm.Source.allCases, id: \.self) { Text($0.rawValue) }
+            }
+            .pickerStyle(.segmented)
+            switch form.source {
+            case .url:
+                Section {
+                    TextField("URL", text: Binding(form, \.url), prompt: Text("https://gist.githubusercontent.com/you/…/raw/machine.json"))
+                } header: {
+                    Text("Download machine.json over HTTPS")
+                } footer: {
+                    Text("For a gist, use its Raw link without the commit id (…/raw/machine.json, not …/raw/<id>/machine.json) so sync always gets the latest version. Saved to ~/.loki/config, which only you can read and the loki CLI reads too.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            case .ssh:
+                Section {
+                    TextField("Host", text: Binding(form, \.host), prompt: Text("54.123.45.67"))
+                    TextField("User", text: Binding(form, \.user), prompt: Text("ubuntu"))
+                    TextField("Port", text: Binding(form, \.port), prompt: Text("22"))
+                    TextField("machines.json path", text: Binding(form, \.remotePath), prompt: Text("/opt/machines.json"))
+                } header: {
+                    Text("Fetch machine.json over SSH")
+                } footer: {
+                    Text("Uses your SSH keys without prompting, so the host must accept key login and already be in ~/.ssh/known_hosts. Saved to ~/.loki/config, which the loki CLI reads too.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
             }
             if let status = form.status {
                 Label(status.text, systemImage: status.ok ? "checkmark.circle.fill" : "xmark.circle.fill")
@@ -91,10 +120,10 @@ struct SyncSettingsView: View {
                     .textSelection(.enabled)
             }
             HStack {
-                Button("Import from shell profile") { importFromProfile() }
+                if form.source == .ssh { Button("Import from shell profile") { importFromProfile() } }
                 Spacer()
                 if form.busy { ProgressView().controlSize(.small) }
-                Button("Test connection") { test() }.disabled(form.busy)
+                Button(form.source == .url ? "Test download" : "Test connection") { test() }.disabled(form.busy)
                 Button("Save") { save() }.disabled(form.busy)
                 Button("Save and sync") { save(thenSync: true) }.buttonStyle(.borderedProminent).disabled(form.busy)
             }
@@ -115,8 +144,8 @@ struct SyncSettingsView: View {
     @discardableResult
     private func save(thenSync: Bool = false) -> Bool {
         let s = form.settings
-        if !s.problems.isEmpty {
-            form.status = (s.problems.joined(separator: " "), false)
+        if !form.problems.isEmpty {
+            form.status = (form.problems.joined(separator: " "), false)
             return false
         }
         do {
@@ -133,11 +162,25 @@ struct SyncSettingsView: View {
 
     private func test() {
         let s = form.settings
+        guard form.problems.isEmpty else {
+            form.status = (form.problems.joined(separator: " "), false)
+            return
+        }
         form.busy = true
         form.status = nil
         Task {
+            defer { form.busy = false }
+            if s.usesURL {
+                // Downloads and checks the file like a sync would, without saving it
+                do {
+                    let machines = try await model.engine.syncer.fetch(s).all
+                    form.status = ("Downloaded a valid list of \(machines.count) machine\(machines.count == 1 ? "" : "s").", true)
+                } catch {
+                    form.status = (error.localizedDescription, false)
+                }
+                return
+            }
             let result = await model.engine.syncer.testConnection(s)
-            form.busy = false
             form.status = result.succeeded
                 ? ("Connected, and \(s.remotePath) is readable.", true)
                 : (result.output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -222,12 +265,26 @@ struct GeneralView: View {
         Form {
             Toggle("Open at login", isOn: Binding(get: { model.openAtLogin }, set: { model.setOpenAtLogin($0) }))
             LabeledContent("Toggle the panel", value: "⌥⌘L")
-            LabeledContent("Health check", value: "Every \(Int(model.interval)) seconds")
+            Picker("Health check", selection: Binding(get: { Int(model.interval) }, set: { model.setInterval($0) })) {
+                ForEach(HealthInterval.choices, id: \.self) { Text(Self.label($0)).tag($0) }
+            }
             LabeledContent("Data folder") {
                 Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([model.engine.paths.machines]) }
             }
-            LabeledContent("Version", value: model.version)
+            LabeledContent("Version") {
+                HStack {
+                    Text(model.version)
+                    if let update = model.update {
+                        Button("Update to \(update)…") { NSWorkspace.shared.open(UpdateCheck.releasesPage) }
+                            .help("Opens the release page with the new DMG")
+                    }
+                }
+            }
         }
         .formStyle(.grouped)
+    }
+
+    private static func label(_ seconds: Int) -> String {
+        seconds < 60 ? "Every \(seconds) seconds" : seconds == 60 ? "Every minute" : "Every \(seconds / 60) minutes"
     }
 }

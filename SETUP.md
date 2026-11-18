@@ -33,7 +33,7 @@ If it prints `root`, see [nginx runs as root](#nginx-runs-as-root).
    xattr -dr com.apple.quarantine /Applications/Loki.app
    ```
 3. On first launch, **Setup** opens and checks everything. Click the fix next to each problem: install or start nginx, switch a root nginx to you, make the config folder yours, add `stream { include …/remote.conf; }` to nginx.conf. Fixes that need root show the macOS password prompt once.
-4. Add machines: **Settings → Sync** with your team's SSH host, user, port and the path of `machine.json` there (key login, host in `~/.ssh/known_hosts`), then **Sync**. Or add or import them in **Settings → Machines**.
+4. Add machines: **Settings → Sync** with either a URL, such as a gist's Raw link (`https://gist.githubusercontent.com/<user>/<id>/raw/machine.json`, leaving out the commit id so you always get the latest; whoever can edit it decides where your ports lead, so prefer a file whose changes get reviewed), or your team's SSH host, user, port and the path of `machine.json` there (key login, host in `~/.ssh/known_hosts`). Then **Save and sync**. Or add or import them in **Settings → Machines**.
 5. Pick a machine from the menu bar icon.
 
 ## 4. The CLI (macOS and Linux, optional)
@@ -54,6 +54,11 @@ After connecting, every `local` port in `machine.json` reaches its machine:
 ```bash
 nc -z localhost 8081 && echo ok         # use one of your local ports
 ```
+
+## Updating
+
+- **App:** when a new release is out, the menu bar panel shows **Loki X.Y.Z is available** (and Settings → General an **Update** button). Click it, download the DMG, quit Loki, drag the new Loki over the old one in Applications, and allow it once more as in step 3.2: every new download is blocked until you do. Your machines and settings stay.
+- **CLI:** run the install command again. It replaces the `loki` script with the latest release's and keeps `~/.loki`; if the download fails, the installed `loki` stays as it was.
 
 ## nginx runs as root
 

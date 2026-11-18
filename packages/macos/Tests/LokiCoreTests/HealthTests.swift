@@ -3,12 +3,13 @@ import Network
 import Testing
 @testable import LokiCore
 
-/// A loopback-only TCP listener; `reply` (if any) is sent after the first bytes arrive, then the connection closes.
+/// A loopback-only TCP listener; `reply` (if any) is sent after the first bytes arrive, then the connection
+/// closes, or with `keepOpen` stays open until the client leaves, like a server still sending a long body.
 private final class LocalListener: @unchecked Sendable {
     let listener: NWListener
     private let queue = DispatchQueue(label: "loki.tests.listener")
 
-    init(reply: String? = nil) throws {
+    init(reply: String? = nil, keepOpen: Bool = false) throws {
         let params = NWParameters.tcp
         params.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: .any)
         listener = try NWListener(using: params)
@@ -16,7 +17,10 @@ private final class LocalListener: @unchecked Sendable {
             connection.start(queue: queue)
             guard let reply else { return }
             connection.receive(minimumIncompleteLength: 1, maximumLength: 65_536) { _, _, _, _ in
-                connection.send(content: Data(reply.utf8), completion: .contentProcessed { _ in connection.cancel() })
+                connection.send(content: Data(reply.utf8), completion: .contentProcessed { _ in
+                    guard keepOpen else { return connection.cancel() }
+                    connection.receive(minimumIncompleteLength: 1, maximumLength: 1) { _, _, _, _ in connection.cancel() }
+                })
             }
         }
     }
@@ -103,6 +107,19 @@ private final class LocalListener: @unchecked Sendable {
         withExtendedLifetime(server) {}
     }
 
+    @Test func httpProbeStopsAtTheHeaders() async throws {
+        // A page still downloading: headers and a first chunk of a 100 MB body, then nothing more.
+        // Waiting for the whole body, the probe timed out after 3 s and reported no HTTP status.
+        // (The chunk matters: URLSession hands over the response with the first body bytes.)
+        let headers = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 100000000\r\n\r\n"
+        let server = try LocalListener(reply: headers + String(repeating: "x", count: 4096), keepOpen: true)
+        let port = try await server.start()
+        let start = Date()
+        #expect(await httpProbe(port: port) == "HTTP 200")
+        #expect(Date().timeIntervalSince(start) < 2)
+        withExtendedLifetime(server) {}
+    }
+
     @Test func httpProbeOfAClosedPortIsNil() async throws {
         let port: Int
         do {
@@ -112,5 +129,10 @@ private final class LocalListener: @unchecked Sendable {
         }
         try await Task.sleep(for: .milliseconds(100))
         #expect(await httpProbe(port: port) == nil)
+    }
+
+    @Test func storedIntervalOutsideTheChoicesFallsBackToAMinute() {
+        for seconds in HealthInterval.choices { #expect(HealthInterval.sanitized(seconds) == seconds) }
+        for seconds in [0, -15, 1, 45, 86_400, Int.max] { #expect(HealthInterval.sanitized(seconds) == 60) }
     }
 }

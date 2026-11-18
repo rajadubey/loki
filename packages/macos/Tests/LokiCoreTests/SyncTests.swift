@@ -89,6 +89,7 @@ private func scpWriting(_ content: String) -> FakeRunner.Handler {
         LOKI_SSH_HOST='h.example.com'
         LOKI_SSH_PORT='2222'
         LOKI_REMOTE_MACHINES_JSON='/mnt/machines.json'
+        LOKI_SYNC_URL=''
 
         """)
     }
@@ -128,6 +129,7 @@ private func scpWriting(_ content: String) -> FakeRunner.Handler {
         BAZ="qux"
         LOKI_SSH_USER='u'
         LOKI_REMOTE_MACHINES_JSON='/p'
+        LOKI_SYNC_URL=''
 
         """)
         // no trailing newline in the existing file: same result
@@ -138,6 +140,21 @@ private func scpWriting(_ content: String) -> FakeRunner.Handler {
         let s = SyncSettings(user: "u", host: "h", port: 22, remotePath: "/p")
         let once = s.serialized(preserving: "X=1\n")
         #expect(s.serialized(preserving: once) == once)
+    }
+
+    @Test func urlRoundTripsAndWinsOverSSH() {
+        let s = SyncSettings(host: "h", url: "https://example.com/team's/m.json?x=1#top")
+        #expect(SyncSettings.parse(s.serialized()) == s)
+        #expect(s.usesURL && s.isConfigured)
+        #expect(s.source == "https://example.com/team's/m.json")
+        #expect(SyncSettings(url: "https://example.com/m.json").isConfigured)  // no SSH host needed
+        #expect(!SyncSettings(host: "h").usesURL)
+        #expect(SyncSettings.isPresent(in: "export LOKI_SYNC_URL=https://example.com/m.json"))
+    }
+
+    @Test func urlProblemsNameTheFix() {
+        #expect(SyncSettings(url: "http://example.com/m.json").problems == ["The URL must be a full https:// address without spaces, quotes or backslashes."])
+        #expect(SyncSettings(url: "https://gist.github.com/u/abc").problems.first?.contains("Raw link") == true)
     }
 
     @Test func problemsForDefaults() {
@@ -195,7 +212,7 @@ private func scpWriting(_ content: String) -> FakeRunner.Handler {
     }
 
     private func seedOldMachines() throws -> Data {
-        try store.save(["old": Machine(ip: "9.9.9.9", services: [:])])
+        try store.save(MachineFile(machines: ["old": Machine(ip: "9.9.9.9", services: [:])]))
         return try Data(contentsOf: store.paths.machines)
     }
 
@@ -224,7 +241,7 @@ private func scpWriting(_ content: String) -> FakeRunner.Handler {
     @Test func syncDownloadsWithScpAndSaves() async throws {
         let old = try seedOldMachines()
         runner.onAny("scp", handler: scpWriting(remoteJSON))
-        let machines = try await Syncer(runner: runner).sync(settings, into: store)
+        let machines = try await Syncer(runner: runner).sync(settings, into: store).all
         #expect(machines == ["build": Machine(ip: "10.1.0.1", services: ["web": Ports(local: 8080, remote: 80)])])
         #expect(try store.load() == machines)
         #expect(try Data(contentsOf: tmp.path(".loki/machine.json.bak")) == old)
@@ -256,6 +273,38 @@ private func scpWriting(_ content: String) -> FakeRunner.Handler {
         } catch SyncError.invalidDownload {
         } catch {
             Issue.record("expected invalidDownload, got \(error)")
+        }
+        #expect(try Data(contentsOf: store.paths.machines) == old)
+        #expect(!tmp.exists(".loki/machine.json.bak"))
+    }
+
+    @Test func syncDownloadsAURLWithCurlAndSaves() async throws {
+        let old = try seedOldMachines()
+        runner.onAny("curl", handler: curlWriting(remoteJSON))
+        let s = SyncSettings(host: "build.example.com", url: "https://gist.githubusercontent.com/u/abc/raw/machine.json")
+        let machines = try await Syncer(runner: runner).sync(s, into: store).all
+        #expect(machines == ["build": Machine(ip: "10.1.0.1", services: ["web": Ports(local: 8080, remote: 80)])])
+        #expect(try store.load() == machines)
+        #expect(try Data(contentsOf: tmp.path(".loki/machine.json.bak")) == old)
+        #expect(runner.calls(to: "scp").isEmpty)  // the URL wins over SSH
+
+        let call = try #require(runner.calls(to: "curl").first)
+        let download = try #require(call.firstIndex(of: "-o").map { call[$0 + 1] })
+        #expect(!FileManager.default.fileExists(atPath: download))  // temp download cleaned up
+    }
+
+    @Test func fetchChecksADownloadWithoutSavingIt() async throws {
+        runner.onAny("curl", handler: curlWriting(remoteJSON))
+        let machines = try await Syncer(runner: runner).fetch(SyncSettings(url: "https://example.com/m.json")).all
+        #expect(machines.keys.sorted() == ["build"])
+        #expect(!tmp.exists(".loki/machine.json"))
+    }
+
+    @Test func failedDownloadLeavesMachinesUntouched() async throws {
+        let old = try seedOldMachines()
+        runner.onAny("curl") { _, _ in FakeRunner.fail("curl: (22) The requested URL returned error: 404\n", status: 22) }
+        await #expect(throws: SyncError.fetchFailed("curl: (22) The requested URL returned error: 404")) {
+            try await Syncer(runner: runner).sync(SyncSettings(url: "https://example.com/m.json"), into: store)
         }
         #expect(try Data(contentsOf: store.paths.machines) == old)
         #expect(!tmp.exists(".loki/machine.json.bak"))

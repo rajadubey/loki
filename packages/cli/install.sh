@@ -53,17 +53,12 @@ check_deps() {
     fi
   done
   
+  # No "continue anyway?" prompt: under `curl … | bash` it can't be answered, and loki needs both
   if [ ${#missing[@]} -gt 0 ]; then
     warn "Missing dependencies: ${missing[*]}"
-    echo "Please install them using your package manager:"
     echo "  macOS: brew install ${missing[*]}"
     echo "  Ubuntu/Debian: sudo apt install ${missing[*]}"
-    echo
-    read -p "Continue anyway? [y/N] " -n 1 -r
-    echo
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-      fatal "Installation aborted"
-    fi
+    fatal "Install them, then run the installer again"
   fi
 }
 
@@ -102,29 +97,40 @@ detect_profile() {
 # Download loki script
 download_loki() {
   log "Downloading loki..."
-  
-  if ! curl -fsSL -o "$LOKI_INSTALL_DIR/loki" "$LOKI_RAW_URL"; then
-    fatal "Failed to download loki from $LOKI_RAW_URL"
+  local new="$LOKI_INSTALL_DIR/loki.new"
+
+  # Beside the installed one, checked, then swapped in: a dropped download must not leave a broken
+  # loki. curl as for sync: -q (first) skips ~/.curlrc; https only, redirects included.
+  if ! curl -q -fsSL --proto =https --proto-redir =https -o "$new" "$LOKI_RAW_URL" ||
+     ! grep -q '^VERSION=' "$new" || ! bash -n "$new"; then
+    rm -f "$new"
+    fatal "Failed to download loki from $LOKI_RAW_URL; the installed one (if any) is unchanged"
   fi
-  
-  chmod +x "$LOKI_INSTALL_DIR/loki"
-  ok "Downloaded loki to $LOKI_INSTALL_DIR/loki"
+
+  chmod +x "$new" && mv -f "$new" "$LOKI_INSTALL_DIR/loki"
+  ok "Downloaded loki $(sed -n 's/^VERSION=//p' "$LOKI_INSTALL_DIR/loki") to $LOKI_INSTALL_DIR/loki"
 }
 
 # Create symlink
 create_symlink() {
-  local symlink_dir="/usr/local/bin"
+  local symlink_dir="${LOKI_BIN_DIR:-/usr/local/bin}"  # LOKI_BIN_DIR: another folder on PATH (the tests use a sandbox)
   local symlink_path="$symlink_dir/loki"
-  
-  # Check if we can write to /usr/local/bin
+
+  # On an update the link is usually there already: no sudo prompt for nothing
+  if [ "$(readlink "$symlink_path" 2>/dev/null)" = "$LOKI_INSTALL_DIR/loki" ]; then
+    ok "Symlink already in place: $symlink_path"
+    return
+  fi
+
+  # Check if we can write to it; sudo only for the default folder, never for a LOKI_BIN_DIR
   if [ ! -w "$symlink_dir" ]; then
     warn "Cannot write to $symlink_dir, need sudo access"
-    if sudo ln -sf "$LOKI_INSTALL_DIR/loki" "$symlink_path" 2>/dev/null; then
+    if [ -z "${LOKI_BIN_DIR:-}" ] && sudo ln -sf "$LOKI_INSTALL_DIR/loki" "$symlink_path" 2>/dev/null; then
       ok "Created symlink with sudo: $symlink_path -> $LOKI_INSTALL_DIR/loki"
     else
       warn "Failed to create system symlink, using local installation"
       echo "You can manually create a symlink later:"
-      echo "  sudo ln -sf $LOKI_INSTALL_DIR/loki /usr/local/bin/loki"
+      echo "  sudo ln -sf $LOKI_INSTALL_DIR/loki $symlink_path"
       echo "Or add $LOKI_INSTALL_DIR to your PATH"
       return
     fi
@@ -209,16 +215,15 @@ main() {
   log "Installation directory: $LOKI_INSTALL_DIR"
   
   # Create installation directory
+  local updating=false
   if [ ! -d "$LOKI_INSTALL_DIR" ]; then
     mkdir -p "$LOKI_INSTALL_DIR" || fatal "Failed to create directory $LOKI_INSTALL_DIR"
     ok "Created installation directory"
   else
-    warn "Installation directory already exists: $LOKI_INSTALL_DIR"
-    read -p "Continue with installation? [y/N] " -n 1 -r
-    echo
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-      fatal "Installation aborted"
-    fi
+    # Normal on a re-run (that's how you update) and for app users: ~/.loki is also the data folder.
+    # No prompt: under `curl … | bash` it would read end-of-input and abort.
+    log "Using the existing $LOKI_INSTALL_DIR; machines and settings in it are kept"
+    [ -f "$LOKI_INSTALL_DIR/loki" ] && updating=true
   fi
   
   # Check dependencies
@@ -237,6 +242,12 @@ main() {
   verify_installation
   
   echo
+  if [ "$updating" = true ]; then
+    # Not the getting-started steps: `loki init` would sync over a hand-edited machine.json
+    echo -e "${GREEN}${BOLD}Updated loki to $(sed -n 's/^VERSION=//p' "$LOKI_INSTALL_DIR/loki").${NC} Your machines and settings are unchanged."
+    echo
+    return
+  fi
   echo -e "${GREEN}${BOLD}Installation complete!${NC}"
   echo
   echo "To get started:"

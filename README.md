@@ -22,9 +22,13 @@ Step by step, including nginx and a clean reinstall: **[SETUP.md](SETUP.md)**. I
 |---|---|
 | `machine.json` | Machines and their services (format below) |
 | `active` | Name of the connected machine |
-| `config` | Sync settings (`LOKI_SSH_HOST='…'` etc.), written by the app's Sync tab, sourced by the CLI |
+| `config` | Sync settings (`LOKI_SYNC_URL='https://…'` or `LOKI_SSH_HOST='…'` etc.), written by the app's Sync tab, sourced by the CLI |
 | `remote.conf` | Last generated nginx config (the live copy sits next to `nginx.conf`) |
-| `loki.log` | Log of every operation, from both packages |
+| `loki.log` | Log of every operation, from both packages; past 1 MB it moves to `loki.log.1` |
+
+The folder is owner-only (0700) like `~/.ssh`, so other users can't reach anything in it: both packages set that up and tighten a folder older versions left world-readable. The CLI only sources `config` when it's yours and not writable by everyone. A `machine.json` from sync is checked before it replaces yours: names, addresses and ports go into nginx's config, so anything that could inject a directive is refused, by both packages alike.
+
+Whoever can edit the shared `machine.json` decides where your local ports lead, so keep it somewhere changes get reviewed (a repo file changed through pull requests, or a commit-pinned Raw URL you update on purpose) rather than a gist anyone on the team can edit unnoticed.
 
 ```json
 {
@@ -38,7 +42,30 @@ Step by step, including nginx and a clean reinstall: **[SETUP.md](SETUP.md)**. I
 }
 ```
 
-nginx listens on each `local` port and forwards it to `ip:remote`. nginx.conf needs the generated file inside a top-level `stream` block; the app's Setup adds it for you:
+Machines that run the same services can share them: `containers` maps machine names to IPs, and each of those machines gets the top-level `services`. Every other key is a machine with its own `ip` and `services` only, so a file without `containers` works as it always did:
+
+```json
+{
+  "containers": {
+    "staging1": "10.0.1.11",
+    "staging2": "10.0.1.12"
+  },
+  "services": {
+    "web": { "local": 8081, "remote": 8081 },
+    "api": { "local": 9000, "remote": 7000 }
+  },
+  "devbox": {
+    "ip": "10.0.1.47",
+    "services": {
+      "api": { "local": 9000, "remote": 9000 }
+    }
+  }
+}
+```
+
+Machine names use letters, digits, `.`, `_` and `-`; service names letters, digits, `_` and `-` (nginx uses them as upstream names, so no spaces). A machine can't be called `containers` or `services`, or be both a container and a machine of its own.
+
+nginx listens on `127.0.0.1:<local>` (this machine only, so nobody else on your network can use it to reach the remote ones) and forwards it to `ip:remote`. nginx.conf needs the generated file inside a top-level `stream` block; the app's Setup adds it for you:
 
 ```nginx
 stream {
