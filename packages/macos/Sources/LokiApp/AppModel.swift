@@ -36,6 +36,11 @@ final class AppModel {
     /// Version of a newer release, when GitHub has one.
     var update: String?
 
+    /// Whether the menu bar panel shows. Closed, a check probes only the connected machine's services,
+    /// which the menu bar title and notifications need; open, also what only the panel shows: the
+    /// other machines' reachability, HTTP status and whether nginx runs.
+    @ObservationIgnored var panelOpen = false
+    @ObservationIgnored private var lastFullCheck = Date.distantPast
     @ObservationIgnored var onChange: (() -> Void)?
     @ObservationIgnored var openSettings: ((SettingsTab) -> Void)?
     @ObservationIgnored private var notified: Set<String> = []
@@ -81,6 +86,14 @@ final class AppModel {
 
     func readLog() {
         logLines = engine.log.tail(50)
+    }
+
+    /// The panel opened: fresh files and log, and a full check unless one just ran.
+    func panelOpened() {
+        panelOpen = true
+        reload()
+        readLog()
+        if Date().timeIntervalSince(lastFullCheck) > 15 { Task { await check() } }
     }
 
     func refreshSetup() async {
@@ -152,20 +165,25 @@ final class AppModel {
 
     private func checkOnce() async {
         reload()
-        nginxRunning = await engine.nginx.isRunning()
+        let full = panelOpen
+        if full {
+            lastFullCheck = Date()
+            nginxRunning = await engine.nginx.isRunning()
+        }
 
-        // ponytail: one TCP probe per service per minute; batch if machine.json grows to thousands.
+        // ponytail: one TCP probe per service per check; batch if machine.json grows to thousands.
         var latency: [String: [String: Int?]] = [:]
-        let all = machines
+        let probed = full ? machines : machines.filter { $0.key == active }
         await withTaskGroup(of: (String, String, Int?).self) { group in
-            for (m, machine) in all {
+            for (m, machine) in probed {
                 for (s, p) in machine.ports {
                     group.addTask { (m, s, await tcpProbe(host: machine.ip, port: p.remote)) }
                 }
             }
             for await (m, s, ms) in group { latency[m, default: [:]][s] = ms }
         }
-        reachable = latency.mapValues { $0.values.contains { $0 != nil } }
+        let seen = latency.mapValues { $0.values.contains { $0 != nil } }
+        reachable = full ? seen : reachable.merging(seen) { $1 }
 
         guard let name = active, let machine = machines[name] else {
             status = [:]
@@ -173,16 +191,19 @@ final class AppModel {
             return
         }
         var http: [String: String] = [:]
-        await withTaskGroup(of: (String, String?).self) { group in
-            for (s, p) in machine.ports { group.addTask { (s, await httpProbe(port: p.local)) } }
-            for await (s, h) in group { http[s] = h }
+        if full {
+            await withTaskGroup(of: (String, String?).self) { group in
+                for (s, p) in machine.ports { group.addTask { (s, await httpProbe(port: p.local)) } }
+                for await (s, h) in group { http[s] = h }
+            }
         }
 
         let now = Date()
         var next: [String: ServiceStatus] = [:]
         for (s, p) in machine.ports {
             let ms = latency[name]?[s] ?? nil
-            next[s] = ServiceStatus(health: classify(ms), latencyMs: ms, http: http[s])
+            // Closed, the last HTTP status stays: only the panel shows it, and opening it checks again
+            next[s] = ServiceStatus(health: classify(ms), latencyMs: ms, http: full ? http[s] : status[s]?.http)
             let key = "\(name)/\(s)"
             if ms == nil {
                 let since = downSince[key] ?? now

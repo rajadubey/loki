@@ -356,9 +356,8 @@ struct PanelFooter: View {
         HStack {
             VStack(alignment: .leading, spacing: 1) {
                 Text("Loki \(model.version)")
-                TimelineView(.periodic(from: .now, by: 1)) { ctx in
-                    Text("Next check in \(max(0, Int(model.nextCheck.timeIntervalSince(ctx.date))))s")
-                }
+                // A time, not a countdown: a countdown redraws every second
+                Text("Next check at \(model.nextCheck.formatted(date: .omitted, time: .standard))")
             }
             .font(.caption).foregroundStyle(.secondary)
             Spacer()

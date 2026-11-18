@@ -21,6 +21,13 @@ All notable changes to LOKI are documented here.
   tests that both reject the same unsafe downloads.
 
 ### Changed
+- **The app is much lighter.** With the panel closed it only checks the connected machine's services,
+  which the menu bar title and notifications need; the other machines, HTTP status and nginx are
+  checked when you open the panel. The panel and Settings window are freed when closed instead of kept
+  hidden, and the panel's per-second "Next check in" countdown is gone: it kept SwiftUI redrawing about
+  70 times a second even with the panel closed. HTTP checks stop as soon as the response arrives
+  instead of downloading the whole page, which also fixes the missing HTTP status of large or streamed
+  pages (the check used to time out).
 - **nginx listens on 127.0.0.1 only.** Before, every proxied port was open on all network interfaces, so
   anyone on the same network could use your machine to reach the remote ones (VPN-only hosts included).
   Reaching them from another device no longer works. If another device can still reach a port after you

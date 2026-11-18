@@ -11,7 +11,7 @@ The menu bar shows the connected machine and how many of its services are up: gr
 - **Log:** the latest lines of `~/.loki/loki.log`.
 - **Options:** check now, sync, reload, disconnect, Settings (⌘,), Setup, quit.
 
-Every minute (or every 15 seconds to 10 minutes, as set in Settings → General) it opens a TCP connection to each service's `ip:remote` (so non-HTTP services work too) and notifies you when one is still down a minute after it first failed; at intervals of a minute or more, that means two failed checks in a row.
+Every minute (or every 15 seconds to 10 minutes, as set in Settings → General) it opens a TCP connection to each of the connected machine's services at `ip:remote` (so non-HTTP services work too) and notifies you when one is still down a minute after it first failed; at intervals of a minute or more, that means two failed checks in a row. That is all it does in the background. What only the panel shows (the other machines' reachability, each service's HTTP status and whether nginx runs) is checked when you open the panel and at each check while it stays open; the HTTP check stops as soon as the response arrives instead of downloading the page. A closed panel or Settings window keeps no views in memory.
 
 At launch and then once a day (hourly while GitHub can't be reached) it asks GitHub for the latest release. When there's a newer one, the panel shows **Loki X.Y.Z is available** and General shows an **Update** button; both open the release page to download the DMG. Nothing installs by itself.
 

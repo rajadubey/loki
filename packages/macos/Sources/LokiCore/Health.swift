@@ -39,13 +39,16 @@ public func downText(since: Date, now: Date = Date()) -> String {
     return minutes < 1 ? "Down <1m" : minutes < 60 ? "Down \(minutes)m" : "Down \(minutes / 60)h"
 }
 
+/// One serial queue for every probe's callbacks, which are tiny, instead of a queue per probe.
+private let probeQueue = DispatchQueue(label: "loki.probe")
+
 /// TCP connect time in ms, or nil if refused / unreachable within `timeout` seconds.
 /// Goes straight to the remote, so it works for HTTP and non-HTTP services alike.
 public func tcpProbe(host: String, port: Int, timeout: Double = 3) async -> Int? {
     guard (1...65535).contains(port), let p = NWEndpoint.Port(rawValue: UInt16(port)) else { return nil }
     return await withCheckedContinuation { continuation in
         let connection = NWConnection(host: NWEndpoint.Host(host), port: p, using: .tcp)
-        let queue = DispatchQueue(label: "loki.probe")
+        let queue = probeQueue
         let start = Date()
         let state = ProbeState()
         @Sendable func finish(_ value: Int?) {
@@ -65,7 +68,7 @@ public func tcpProbe(host: String, port: Int, timeout: Double = 3) async -> Int?
     }
 }
 
-/// Guards a continuation against double resume; only touched on the probe's serial queue.
+/// Guards a continuation against double resume; only touched on the serial probe queue.
 private final class ProbeState: @unchecked Sendable {
     private var done = false
     func finishOnce() -> Bool {
@@ -78,13 +81,17 @@ private final class ProbeState: @unchecked Sendable {
 private let probeSession: URLSession = {
     let config = URLSessionConfiguration.ephemeral
     config.timeoutIntervalForRequest = 3
+    config.urlCache = nil  // a probe only wants the status: nothing to keep between checks
+    config.httpCookieStorage = nil
     return URLSession(configuration: config)
 }()
 
-/// "HTTP 200" etc. through the local nginx port, or nil for non-HTTP / no answer.
+/// "HTTP 200" etc. through the local nginx port, or nil for non-HTTP / no answer. Stops as soon as the
+/// response arrives (with its first bytes): the rest of the body, which can be a whole web app, isn't
+/// downloaded.
 public func httpProbe(port: Int, host: String = "127.0.0.1") async -> String? {
     guard let url = URL(string: "http://\(host):\(port)"),
-          let (_, response) = try? await probeSession.data(from: url),
-          let http = response as? HTTPURLResponse else { return nil }
-    return "HTTP \(http.statusCode)"
+          let (body, response) = try? await probeSession.bytes(from: url) else { return nil }
+    body.task.cancel()
+    return (response as? HTTPURLResponse).map { "HTTP \($0.statusCode)" }
 }
