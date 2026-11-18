@@ -6,6 +6,11 @@ All notable changes to LOKI are documented here.
 
 ### Added
 - The macOS app has its own icon instead of the generic one.
+- **Shared services in `machine.json`**: `containers` maps machine names to IPs, and each of those machines
+  gets the top-level `services`, so machines that run the same services list them once. Every other key
+  is still a machine with its own `ip` and `services`, so existing files work unchanged. Both packages
+  read it, sync and import keep it as written, and the app's Machines tab has *Use shared services*. A
+  machine can no longer be called `containers` or `services`.
 - **Sync from a URL**: `machine.json` can come from an `https://` address such as a gist's Raw link, in the
   app's Sync tab (with *Test download*) or `LOKI_SYNC_URL` for the CLI. It wins over SSH when set.
 - **Health check interval** in the app's Settings → General: every 15 seconds to 10 minutes (default 1 minute).

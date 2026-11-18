@@ -42,6 +42,29 @@ Whoever can edit the shared `machine.json` decides where your local ports lead, 
 }
 ```
 
+Machines that run the same services can share them: `containers` maps machine names to IPs, and each of those machines gets the top-level `services`. Every other key is a machine with its own `ip` and `services` only, so a file without `containers` works as it always did:
+
+```json
+{
+  "containers": {
+    "staging1": "10.0.1.11",
+    "staging2": "10.0.1.12"
+  },
+  "services": {
+    "web": { "local": 8081, "remote": 8081 },
+    "api": { "local": 9000, "remote": 7000 }
+  },
+  "devbox": {
+    "ip": "10.0.1.47",
+    "services": {
+      "api": { "local": 9000, "remote": 9000 }
+    }
+  }
+}
+```
+
+Machine names use letters, digits, `.`, `_` and `-`; service names letters, digits, `_` and `-` (nginx uses them as upstream names, so no spaces). A machine can't be called `containers` or `services`, or be both a container and a machine of its own.
+
 nginx listens on `127.0.0.1:<local>` (this machine only, so nobody else on your network can use it to reach the remote ones) and forwards it to `ip:remote`. nginx.conf needs the generated file inside a top-level `stream` block; the app's Setup adds it for you:
 
 ```nginx

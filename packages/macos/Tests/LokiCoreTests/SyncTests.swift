@@ -212,7 +212,7 @@ private func scpWriting(_ content: String) -> FakeRunner.Handler {
     }
 
     private func seedOldMachines() throws -> Data {
-        try store.save(["old": Machine(ip: "9.9.9.9", services: [:])])
+        try store.save(MachineFile(machines: ["old": Machine(ip: "9.9.9.9", services: [:])]))
         return try Data(contentsOf: store.paths.machines)
     }
 
@@ -241,7 +241,7 @@ private func scpWriting(_ content: String) -> FakeRunner.Handler {
     @Test func syncDownloadsWithScpAndSaves() async throws {
         let old = try seedOldMachines()
         runner.onAny("scp", handler: scpWriting(remoteJSON))
-        let machines = try await Syncer(runner: runner).sync(settings, into: store)
+        let machines = try await Syncer(runner: runner).sync(settings, into: store).all
         #expect(machines == ["build": Machine(ip: "10.1.0.1", services: ["web": Ports(local: 8080, remote: 80)])])
         #expect(try store.load() == machines)
         #expect(try Data(contentsOf: tmp.path(".loki/machine.json.bak")) == old)
@@ -282,7 +282,7 @@ private func scpWriting(_ content: String) -> FakeRunner.Handler {
         let old = try seedOldMachines()
         runner.onAny("curl", handler: curlWriting(remoteJSON))
         let s = SyncSettings(host: "build.example.com", url: "https://gist.githubusercontent.com/u/abc/raw/machine.json")
-        let machines = try await Syncer(runner: runner).sync(s, into: store)
+        let machines = try await Syncer(runner: runner).sync(s, into: store).all
         #expect(machines == ["build": Machine(ip: "10.1.0.1", services: ["web": Ports(local: 8080, remote: 80)])])
         #expect(try store.load() == machines)
         #expect(try Data(contentsOf: tmp.path(".loki/machine.json.bak")) == old)
@@ -295,7 +295,7 @@ private func scpWriting(_ content: String) -> FakeRunner.Handler {
 
     @Test func fetchChecksADownloadWithoutSavingIt() async throws {
         runner.onAny("curl", handler: curlWriting(remoteJSON))
-        let machines = try await Syncer(runner: runner).fetch(SyncSettings(url: "https://example.com/m.json"))
+        let machines = try await Syncer(runner: runner).fetch(SyncSettings(url: "https://example.com/m.json")).all
         #expect(machines.keys.sorted() == ["build"])
         #expect(!tmp.exists(".loki/machine.json"))
     }

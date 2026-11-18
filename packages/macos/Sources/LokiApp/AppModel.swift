@@ -13,6 +13,8 @@ final class AppModel {
     let engine = LokiEngine()
     let assistant = SetupAssistant()
 
+    /// machine.json as written, for the editor; `machines` is every machine with its services.
+    var machineFile = MachineFile()
     var machines: MachineList = [:]
     var active: String?
     var loadError: String?
@@ -63,7 +65,8 @@ final class AppModel {
 
     func reload() {
         do {
-            machines = try store.load()
+            machineFile = try store.loadFile()
+            machines = machineFile.all
             loadError = machines.isEmpty ? "No machines yet. Add or sync them in Settings." : nil
         } catch {
             loadError = error.localizedDescription

@@ -34,6 +34,8 @@ loki edit                    # open machine.json in $EDITOR
 loki tui                     # tmux dashboard: menu plus live status
 ```
 
+Machines listed under `containers` in `machine.json` get its shared `services` (see the [format](../../README.md#shared-data-loki)); `loki` treats them like any other machine.
+
 `connect`, `reload` and `disconnect` write `remote.conf` next to `nginx.conf`, run `nginx -t` (restoring the previous file if it fails), reload nginx, and only then update `~/.loki/active`. They use `sudo` only when nginx's config folder isn't writable or nginx runs as root, which is typical on Linux; Homebrew nginx run as you needs none.
 
 ## Sync settings

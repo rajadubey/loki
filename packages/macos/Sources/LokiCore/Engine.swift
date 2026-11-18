@@ -72,7 +72,7 @@ public struct LokiEngine: Sendable {
         // Before logging: a refused URL may hold a user name and password
         guard settings.problems.isEmpty else { throw SyncError.notConfigured(settings.problems) }
         log.append("Fetching machines.json from \(settings.source) ...")
-        let machines = try await syncer.sync(settings, into: store)
+        let machines = try await syncer.sync(settings, into: store).all
         log.append("✅ Updated local machines.json (\(machines.count) machines)")
         guard let active = store.activeName() else { return }
         if machines[active] != nil {

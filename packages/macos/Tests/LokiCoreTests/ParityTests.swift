@@ -136,6 +136,13 @@ private struct Fixture: Sendable, CustomTestStringConvertible {
 }
 
 /// Every fixture has a machine "dev"; most also have "prod".
+/// dev and prod get the shared services; solo has its own.
+private let containersJSON = """
+{"containers": {"dev": "10.1.2.6", "prod": "10.0.0.9"},
+ "services": {"web": {"local": 8080, "remote": 80}, "db": {"local": 5432, "remote": 5432}},
+ "solo": {"ip": "10.3.3.3", "services": {"ssh": {"local": 2222, "remote": 22}}}}
+"""
+
 private let fixtures: [Fixture] = [
     Fixture(name: "multiple services", json: """
     {"prod": {"ip": "10.0.0.9", "services": {"web": {"local": 8081, "remote": 80}}},
@@ -165,6 +172,16 @@ private let fixtures: [Fixture] = [
     // jq 1.7 keeps number literals as written; both must still write whole numbers for nginx
     Fixture(name: "ports written as decimals", json: """
     {"dev": {"ip": "10.1.2.5", "services": {"web": {"local": 8080.0, "remote": 1e2}}},
+     "prod": {"ip": "10.0.0.9", "services": {"web": {"local": 8081, "remote": 80}}}}
+    """),
+    Fixture(name: "containers share services", json: containersJSON),
+    Fixture(name: "a machine of its own next to containers", json: """
+    {"containers": {"prod": "10.0.0.9"}, "services": {"web": {"local": 8081, "remote": 80}},
+     "dev": {"ip": "10.1.2.7", "services": {"api": {"local": 9000, "remote": 3000}}}}
+    """),
+    Fixture(name: "a machine of its own wins over a container of the same name", json: """
+    {"containers": {"dev": "10.9.9.9"}, "services": {"web": {"local": 8080, "remote": 80}},
+     "dev": {"ip": "10.1.2.8", "services": {"ssh": {"local": 2222, "remote": 22}}},
      "prod": {"ip": "10.0.0.9", "services": {"web": {"local": 8081, "remote": 80}}}}
     """),
 ]
@@ -327,22 +344,47 @@ struct ParityTests {
 
     @Test func machinesSavedBySwiftWorkInTheCLI() async throws {
         let cli = try ParitySandbox()
-        let machines: MachineList = [
-            "zeta": Machine(ip: "10.9.9.9", services: [:]),
-            "alpha": Machine(ip: "10.0.0.1", services: ["web": Ports(local: 8080, remote: 80), "db": Ports(local: 5432, remote: 5432)]),
-            "mid.box-1": Machine(ip: "host.example", services: ["ssh": Ports(local: 2222, remote: 22)]),
-        ]
-        try MachineStore(paths: cli.paths).save(machines)
+        let file = MachineFile(
+            machines: [
+                "zeta": Machine(ip: "10.9.9.9", services: [:]),
+                "alpha": Machine(ip: "10.0.0.1", services: ["web": Ports(local: 8080, remote: 80), "db": Ports(local: 5432, remote: 5432)]),
+                "mid.box-1": Machine(ip: "host.example", services: ["ssh": Ports(local: 2222, remote: 22)]),
+            ],
+            containers: ["box-2": "10.2.2.2"],
+            services: ["api": Ports(local: 9000, remote: 3000)]
+        )
+        try MachineStore(paths: cli.paths).save(file)
 
         let list = await cli.cli("list")
         #expect(list.succeeded, "\(list.output)")
-        #expect(list.output == "Available machines:\n  - alpha\n  - mid.box-1\n  - zeta\n")
+        #expect(list.output == "Available machines:\n  - alpha\n  - box-2\n  - mid.box-1\n  - zeta\n")
 
-        let r = await cli.cli("connect", "alpha")
+        for name in ["alpha", "box-2"] {
+            let r = await cli.cli("connect", name)
+            #expect(r.succeeded, "\(r.output)")
+            let expected = NginxConfig.render(machineName: name, machine: file.all[name]!)
+            #expect(ParitySandbox.normalized(cli.installed) == ParitySandbox.normalized(expected))
+            #expect(await cli.cli("list").output.contains("  * \(name)\n"))
+        }
+    }
+
+    @Test func aFileWithContainersSyncsTheSameInBoth() async throws {
+        let (cli, app) = try twins(fixtures[0].json)
+        await cli.cli("connect", "dev")
+        try await app.engine.connect("dev")
+        for box in [cli, app] { try Data(containersJSON.utf8).write(to: box.root.appending(path: "download.json")) }
+        let settings = SyncSettings(url: "https://example.com/machine.json")
+        try settings.save(to: cli.paths)
+
+        let r = await cli.cli("sync")
         #expect(r.succeeded, "\(r.output)")
-        let expected = NginxConfig.render(machineName: "alpha", machine: machines["alpha"]!)
-        #expect(ParitySandbox.normalized(cli.installed) == ParitySandbox.normalized(expected))
-        #expect(await cli.cli("list").output.contains("  * alpha\n"))
+        try await app.engine.sync(settings)
+
+        expectSameState(cli, app)
+        #expect(app.installed?.contains("server 10.1.2.6:5432;") == true, "dev reloaded as a container")
+        let saved = try MachineStore(paths: app.paths).loadFile()
+        #expect(try MachineStore(paths: cli.paths).loadFile() == saved)
+        #expect(saved.containers == ["dev": "10.1.2.6", "prod": "10.0.0.9"])
     }
 
     @Test func syncFetchesAndReloadsTheSameWayInBoth() async throws {

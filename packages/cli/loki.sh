@@ -11,6 +11,10 @@ CONF_PATH="$LOKI_HOME/machine.json"
 ACTIVE_FILE="$LOKI_HOME/active"
 TMP_CONF="$LOKI_HOME/remote.conf"
 LOG_FILE="$LOKI_HOME/loki.log"
+# machine.json: every key is a machine ({"ip": …, "services": {…}}) except two. "containers" maps more
+# machines' names to IPs, and each of those gets the top-level "services". Every read starts with
+# $ALL, so `.[$n]` is a machine either way (the app's MachineFile.all); a machine of its own wins a clash.
+ALL='(.services // {}) as $shared | ((.containers // {}) | map_values({ip: ., services: $shared})) + del(.containers, .services)'
 
 # ~/.loki holds machine addresses and sync settings, so the folder is owner-only like ~/.ssh (the
 # macOS app does the same at launch): other users can't reach anything in it. Only the folder: a
@@ -51,21 +55,21 @@ set_active() { echo "$1" > "$ACTIVE_FILE"; }
 # NginxConfig.oneLine), so an unchecked value (disconnect doesn't check) can't start a directive.
 one_line() { printf '%s' "$1" | tr '\r\n' '  '; }
 
-# What's wrong with the machine list on stdin, one problem per line; nothing when it's fine.
+# What's wrong with the machine.json on stdin, one problem per line; nothing when it's fine.
 # Names, IPs and ports are written into nginx's config, so anything that could inject a directive
 # is refused: the app's rules. Strict (downloads) also wants both ports of every service; otherwise
-# a service missing one is allowed and skipped, as connect always did.
+# a service missing one is allowed and skipped, as connect always did. The shared services are
+# checked once, as "services", not once per container.
 machine_problems() {
   jq -rs --argjson strict "${1:-false}" '
     def ok($re): type == "string" and test($re);
-    if length != 1 or (.[0] | type) != "object" then "it is not a JSON object of machines"
-    else .[0] | to_entries[] | .key as $m | .value as $v |
-      if ($m | ok("\\A[A-Za-z0-9._-]+\\z") | not) then "machine name \($m | tojson) can only use letters, digits, \".\", \"_\" and \"-\""
-      elif ($v | type) != "object" then "\($m): not an object"
-      elif ($v.ip | ok("\\A[A-Za-z0-9.:\\[\\]-]+\\z") | not) or ($v.ip | startswith("-")) then "\($m): \($v.ip | tojson) is not a valid IP address or hostname"
-      elif ($v.services | type) != "object" then "\($m): \"services\" must be an object"
+    def bad_name: ok("\\A[A-Za-z0-9._-]+\\z") | not;
+    def name_problem: "machine name \(tojson) can only use letters, digits, \".\", \"_\" and \"-\"";
+    def host_problems($m): if (ok("\\A[A-Za-z0-9.:\\[\\]-]+\\z") | not) or startswith("-") then "\($m): \(tojson) is not a valid IP address or hostname" else empty end;
+    def service_problems($m):
+      if type != "object" then "\($m): \"services\" must be an object"
       else
-        ($v.services | to_entries[] | .key as $s | .value as $p |
+        (to_entries[] | .key as $s | .value as $p |
           if ($s | ok("\\A[A-Za-z0-9_-]+\\z") | not) then "\($m): service name \($s | tojson) can only use letters, digits, \"_\" and \"-\""
           elif ($p | type) != "object" then "\($m) → \($s): not an object"
           elif any($p.local, $p.remote; . != null and (type != "number" or . != floor)) then "\($m) → \($s): ports must be whole numbers from 1 to 65535"
@@ -73,8 +77,23 @@ machine_problems() {
           elif any($p.local, $p.remote; . < 1 or . > 65535) then "\($m) → \($s): ports must be whole numbers from 1 to 65535"
           else empty end),
         # Like the app, a service missing a port is skipped, so it neither clashes nor needs a range
-        ([$v.services[] | objects | select(.local != null and .remote != null) | .local] | group_by(.)[] | select(length > 1) | "\($m): local port \(.[0]) is used by more than one service")
-      end
+        ([.[] | objects | select(.local != null and .remote != null) | .local] | group_by(.)[] | select(length > 1) | "\($m): local port \(.[0]) is used by more than one service")
+      end;
+    if length != 1 or (.[0] | type) != "object" then "it is not a JSON object of machines"
+    else .[0] | . as $file |
+      (to_entries[] | select(.key != "containers" and .key != "services") | .key as $m | .value |
+        if ($m | bad_name) then ($m | name_problem)
+        elif type != "object" then "\($m): not an object"
+        else (.ip | host_problems($m)), (.services | service_problems($m)) end),
+      (.containers | select(. != null) |
+        if type != "object" then "\"containers\" must map machine names to IP addresses"
+        else to_entries[] | .key as $m |
+          if ($m | bad_name) then ($m | name_problem)
+          elif $m == "containers" or $m == "services" then "a machine cannot be called \($m | tojson): machine.json uses \"containers\" and \"services\" for shared services"
+          elif ($file | has($m)) then "\($m) is in containers and is also a machine of its own; keep one"
+          else .value | host_problems($m) end
+        end),
+      (.services | select(. != null) | service_problems("services"))
     end' 2>/dev/null || echo "it is not valid JSON"
 }
 
@@ -135,7 +154,7 @@ cmd_list() {
   [ ! -f "$CONF_PATH" ] && { err "machine.json not found. Run 'loki init' first."; exit 1; }
   active=$(get_active)
   echo "Available machines:"
-  jq -r 'keys[]' "$CONF_PATH" | while read -r key; do
+  jq -r "$ALL | keys[]" "$CONF_PATH" | while read -r key; do
     if [ "$key" = "$active" ]; then
       echo -e "  * ${GREEN}${key}${RESET}"
     else
@@ -149,7 +168,7 @@ cmd_connect() {
   [ -z "$name" ] && { err "Usage: loki connect <machine>"; exit 1; }
   [ ! -f "$CONF_PATH" ] && { err "machine.json not found. Run 'loki init' first."; exit 1; }
 
-  jq -e --arg n "$name" 'has($n)' "$CONF_PATH" >/dev/null || { err "Machine '$name' not found in $CONF_PATH"; exit 1; }
+  jq -e --arg n "$name" "$ALL"' | has($n)' "$CONF_PATH" >/dev/null || { err "Machine '$name' not found in $CONF_PATH"; exit 1; }
 
   log "Attempting to connect to machine: $name"
   apply_conf "$name"
@@ -164,17 +183,17 @@ cmd_connect() {
 apply_conf() {
   local name="$1" with_config="${2:-true}" ip conf_dir dest out s local_port remote_port problems
 
-  if [ "$(jq -r --arg n "$name" 'has($n)' "$CONF_PATH" 2>/dev/null)" = false ]; then
+  if [ "$(jq -r --arg n "$name" "$ALL"' | has($n)' "$CONF_PATH" 2>/dev/null)" = false ]; then
     # Machine is gone from machine.json (e.g. after sync): empty the proxy. Same text as the macOS app.
     echo "# Auto-generated remote.conf: $(one_line "$name") was removed from machine.json" > "$TMP_CONF"
   else
   # Checked before anything is written or logged, like the app's connect and reload
   if [ "$with_config" = true ]; then
-    problems=$( { jq --arg n "$name" '{($n): .[$n]}' "$CONF_PATH" 2>/dev/null || echo "not JSON"; } | machine_problems)
+    problems=$( { jq --arg n "$name" "$ALL"' | {($n): .[$n]}' "$CONF_PATH" 2>/dev/null || echo "not JSON"; } | machine_problems)
     # printf, not err's echo -e: the text quotes machine.json, which could hold escape sequences
     [ -n "$problems" ] && { err "machine.json can't be used for $name:"; printf '%s\n' "$problems" >&2; exit 1; }
   fi
-  ip=$(jq -r --arg n "$name" '.[$n].ip' "$CONF_PATH")
+  ip=$(jq -r --arg n "$name" "$ALL"' | .[$n].ip' "$CONF_PATH")
   log "Generating NGINX config for $name ($ip)"
   {
     echo "# Auto-generated remote.conf for $(one_line "$name") ($(one_line "$ip")) [$(date '+%Y-%m-%d %H:%M:%S')]"
@@ -182,7 +201,7 @@ apply_conf() {
       # Sorted by name, services missing a port skipped, ports as whole numbers (8080.0 -> 8080):
       # the macOS app renders the same file. 127.0.0.1 only: on every interface, anyone on the
       # network could use this machine to reach the remote ones.
-      jq -r --arg n "$name" '.[$n].services | to_entries | sort_by(.key)[] | select(.value.local != null and .value.remote != null)
+      jq -r --arg n "$name" "$ALL"' | .[$n].services | to_entries | sort_by(.key)[] | select(.value.local != null and .value.remote != null)
         | "\(.key) \(.value.local | floor) \(.value.remote | floor)"' "$CONF_PATH" |
         while read -r s local_port remote_port; do
           printf '\nupstream %s {\n    server %s:%s;\n}\nserver {\n    listen 127.0.0.1:%s;\n    proxy_pass %s;\n}\n' \
@@ -255,16 +274,16 @@ cmd_status() {
   active=$(get_active)
   [ -z "$active" ] && { warn "No active machine"; exit 0; }
   # --arg: spliced into the filter, a quote in the name would change what jq runs
-  ip=$(jq -r --arg n "$active" '.[$n].ip' "$CONF_PATH")
+  ip=$(jq -r --arg n "$active" "$ALL"' | .[$n].ip' "$CONF_PATH")
   ok "📡 Active machine: $active (${ip})"
-  jq -r --arg n "$active" '.[$n].services | to_entries[] | " - \(.key): local=\(.value.local), remote=\(.value.remote)"' "$CONF_PATH"
+  jq -r --arg n "$active" "$ALL"' | .[$n].services | to_entries[] | " - \(.key): local=\(.value.local), remote=\(.value.remote)"' "$CONF_PATH"
 }
 
 cmd_ping() {
   active=$(get_active)
   [ -z "$active" ] && { err "No active machine"; exit 1; }
   log "🔍 Checking services for $active"
-  jq -r --arg n "$active" '.[$n].services | to_entries[] | "\(.key) \(.value.local)"' "$CONF_PATH" |
+  jq -r --arg n "$active" "$ALL"' | .[$n].services | to_entries[] | "\(.key) \(.value.local)"' "$CONF_PATH" |
     while read -r name port; do
       echo -n "  $name (localhost:$port): "
       
@@ -360,7 +379,7 @@ cmd_sync() {
   ok "✅ Updated local machines.json"
   active=$(get_active)
   [ -z "$active" ] && return 0  # nothing connected, nothing to reload
-  if jq -e --arg n "$active" 'has($n)' "$CONF_PATH" >/dev/null; then
+  if jq -e --arg n "$active" "$ALL"' | has($n)' "$CONF_PATH" >/dev/null; then
     cmd_reload
   else
     log "Active machine $active is no longer in machine.json, disconnecting"
@@ -433,9 +452,7 @@ tui_pick_machine() {
   picked=$(
     {
       [ -n "$active" ] && echo "x Disconnect"
-      jq -r --arg active "$active" '
-        keys[] | if . == $active then "* " + . + "  (active)" else "  " + . end
-      ' "$CONF_PATH"
+      jq -r --arg active "$active" "$ALL"' | keys[] | if . == $active then "* " + . + "  (active)" else "  " + . end' "$CONF_PATH"
     } | fzf --height=90% --reverse --header="Enter to connect, Esc to cancel" --prompt="machine > "
   )
 

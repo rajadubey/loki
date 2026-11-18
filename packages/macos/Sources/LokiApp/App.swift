@@ -69,7 +69,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             window.center()
             settingsWindow = window
         }
-        if tab == .machines && !settingsUI.machines.hasChanges { settingsUI.machines.load(model.machines) }
+        if tab == .machines && !settingsUI.machines.hasChanges { settingsUI.machines.load(model.machineFile) }
         // A menu bar app has no Dock icon; show one while a window is open so it can be found with ⌘Tab.
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)

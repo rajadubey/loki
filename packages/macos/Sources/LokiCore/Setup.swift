@@ -139,11 +139,12 @@ public struct SetupAssistant: Sendable {
 
     func machinesCheck() -> SetupCheck {
         do {
-            let machines = try MachineStore(paths: paths).load()
+            let file = try MachineStore(paths: paths).loadFile()
+            let machines = file.all
             if machines.isEmpty {
                 return SetupCheck(.machines, .warning, "No machines yet", "Sync them from your team's host or add them yourself.", fix: .openMachines)
             }
-            let issues = validate(machines)
+            let issues = validate(file)
             if !issues.isEmpty {
                 return SetupCheck(.machines, .warning, "machine.json has \(issues.count) problem\(issues.count == 1 ? "" : "s")",
                                   issues.first!.description, fix: .openMachines)

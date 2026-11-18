@@ -227,7 +227,7 @@ public struct Syncer: Sendable {
 
     /// Downloads machine.json to a temp file and checks it the way saving would: valid JSON, safe names,
     /// addresses and ports. Changes nothing, so it also backs "Test connection" for a URL.
-    public func fetch(_ s: SyncSettings) async throws -> MachineList {
+    public func fetch(_ s: SyncSettings) async throws -> MachineFile {
         guard s.problems.isEmpty else { throw SyncError.notConfigured(s.problems) }
         let tmp = FileManager.default.temporaryDirectory.appending(path: "loki-machines-\(UUID().uuidString).json")
         defer { try? FileManager.default.removeItem(at: tmp) }
@@ -248,20 +248,20 @@ public struct Syncer: Sendable {
             throw SyncError.invalidDownload("It's over \(Self.maxDownloadBytes / 1_000_000) MB, which no machine list is.")
         }
         do {
-            let machines = try MachineStore.decode(Data(contentsOf: tmp), source: "Downloaded machines.json")
-            let issues = validate(machines)
+            let file = try MachineStore.decode(Data(contentsOf: tmp), source: "Downloaded machines.json")
+            let issues = validate(file)
             guard issues.isEmpty else { throw StoreError.invalid(issues) }
-            return machines
+            return file
         } catch let error as StoreError {
             throw SyncError.invalidDownload(error.errorDescription ?? "")
         }
     }
 
-    /// `fetch`, then replaces machine.json via `store` (which keeps machine.json.bak). Returns the new list.
+    /// `fetch`, then replaces machine.json via `store` (which keeps machine.json.bak). Returns the new file.
     @discardableResult
-    public func sync(_ s: SyncSettings, into store: MachineStore) async throws -> MachineList {
-        let machines = try await fetch(s)
-        try store.save(machines)
-        return machines
+    public func sync(_ s: SyncSettings, into store: MachineStore) async throws -> MachineFile {
+        let file = try await fetch(s)
+        try store.save(file)
+        return file
     }
 }

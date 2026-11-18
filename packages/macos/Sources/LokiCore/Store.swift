@@ -61,15 +61,20 @@ public struct MachineStore: Sendable {
         self.paths = paths
     }
 
-    /// The machine list, or an empty list when machine.json doesn't exist yet.
+    /// Every machine, containers expanded, or none when machine.json doesn't exist yet.
     public func load() throws -> MachineList {
-        guard FileManager.default.fileExists(atPath: paths.machines.path) else { return [:] }
+        try loadFile().all
+    }
+
+    /// machine.json as written, or an empty one when it doesn't exist yet.
+    public func loadFile() throws -> MachineFile {
+        guard FileManager.default.fileExists(atPath: paths.machines.path) else { return MachineFile() }
         return try Self.decode(Data(contentsOf: paths.machines), source: "machine.json")
     }
 
     /// Validates, backs up the previous file to machine.json.bak, then writes atomically (both 0600).
-    public func save(_ machines: MachineList) throws {
-        let issues = validate(machines)
+    public func save(_ file: MachineFile) throws {
+        let issues = validate(file)
         guard issues.isEmpty else { throw StoreError.invalid(issues) }
         try paths.ensurePrivateHome()
         let fm = FileManager.default
@@ -79,18 +84,18 @@ public struct MachineStore: Sendable {
             try fm.copyItem(at: paths.machines, to: backup)
             try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: backup.path)
         }
-        try writePrivately(Self.encode(machines), to: paths.machines)
+        try writePrivately(Self.encode(file), to: paths.machines)
     }
 
     /// Reads a machine.json from anywhere; throws if it isn't valid JSON or fails validation.
-    public func importMachines(from url: URL) throws -> MachineList {
-        let machines = try Self.decode(Data(contentsOf: url), source: url.lastPathComponent)
-        try save(machines)
-        return machines
+    public func importMachines(from url: URL) throws -> MachineFile {
+        let file = try Self.decode(Data(contentsOf: url), source: url.lastPathComponent)
+        try save(file)
+        return file
     }
 
     public func exportMachines(to url: URL) throws {
-        try Self.encode(try load()).write(to: url, options: .atomic)
+        try Self.encode(try loadFile()).write(to: url, options: .atomic)
     }
 
     public func activeName() -> String? {
@@ -113,18 +118,18 @@ public struct MachineStore: Sendable {
         (try? FileManager.default.attributesOfItem(atPath: url.path))?[.modificationDate] as? Date
     }
 
-    static func decode(_ data: Data, source: String) throws -> MachineList {
+    static func decode(_ data: Data, source: String) throws -> MachineFile {
         do {
-            return try JSONDecoder().decode(MachineList.self, from: data)
+            return try JSONDecoder().decode(MachineFile.self, from: data)
         } catch {
             throw StoreError.unreadable("\(source) isn't a valid machine list: \(Self.describe(error))")
         }
     }
 
-    static func encode(_ machines: MachineList) throws -> Data {
+    static func encode(_ file: MachineFile) throws -> Data {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
-        return try encoder.encode(machines)
+        return try encoder.encode(file)
     }
 
     static func describe(_ error: Error) -> String {

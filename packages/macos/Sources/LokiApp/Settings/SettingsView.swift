@@ -173,7 +173,7 @@ struct SyncSettingsView: View {
             if s.usesURL {
                 // Downloads and checks the file like a sync would, without saving it
                 do {
-                    let machines = try await model.engine.syncer.fetch(s)
+                    let machines = try await model.engine.syncer.fetch(s).all
                     form.status = ("Downloaded a valid list of \(machines.count) machine\(machines.count == 1 ? "" : "s").", true)
                 } catch {
                     form.status = (error.localizedDescription, false)

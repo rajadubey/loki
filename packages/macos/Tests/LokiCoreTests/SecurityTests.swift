@@ -19,8 +19,8 @@ import Testing
 
     @Test func dataFolderAndEveryFileLokiWritesAreOwnerOnly() throws {
         let store = MachineStore(paths: paths)
-        try store.save(["m": Machine(ip: "10.0.0.1", services: [:])])
-        try store.save(["m": Machine(ip: "10.0.0.2", services: [:])])  // second save writes machine.json.bak
+        try store.save(MachineFile(machines: ["m": Machine(ip: "10.0.0.1", services: [:])]))
+        try store.save(MachineFile(machines: ["m": Machine(ip: "10.0.0.2", services: [:])]))  // second save writes machine.json.bak
         try store.setActive("m")
         try SyncSettings(host: "h").save(to: paths)
         LokiLog(url: paths.log).append("hello")
@@ -52,7 +52,7 @@ import Testing
 
     @Test func aBackupOfAWorldReadableFileIsPrivateToo() throws {
         try tmp.write(".loki/machine.json", #"{"old": {"ip": "1.1.1.1", "services": {}}}"#)  // as an old CLI left it: 0644
-        try MachineStore(paths: paths).save(["new": Machine(ip: "2.2.2.2", services: [:])])
+        try MachineStore(paths: paths).save(MachineFile(machines: ["new": Machine(ip: "2.2.2.2", services: [:])]))
         #expect(mode(paths.home.appending(path: "machine.json.bak")) == 0o600)
     }
 
@@ -137,6 +137,13 @@ import Testing
         #"{"../m": {"ip": "1.2.3.4", "services": {}}}"#,
         #"{"m\nx": {"ip": "1.2.3.4", "services": {}}}"#,
         #"{"m": {"ip": "1.2.3.4"}}"#,
+        #"{"containers": {"m": "1.2.3.4; include /etc/passwd"}}"#,
+        #"{"containers": {"m\nx": "1.2.3.4"}}"#,
+        #"{"containers": {"services": "1.2.3.4"}}"#,
+        #"{"containers": {"m": "1.2.3.4"}, "m": {"ip": "1.2.3.5", "services": {}}}"#,
+        #"{"containers": ["1.2.3.4"]}"#,
+        #"{"containers": {"m": "1.2.3.4"}, "services": {"web}; server { listen 1": {"local": 8080, "remote": 80}}}"#,
+        #"{"containers": {"m": "1.2.3.4"}, "services": {"web": {"local": 8080, "remote": null}}}"#,
         #"{} {}"#,
         "[]",
         "<html><body>Sign in</body></html>",
@@ -146,7 +153,7 @@ import Testing
     @Test(arguments: unsafeDownloads)
     func unsafeDownloadsAreRejectedAndMachinesKept(_ download: String) async throws {
         let store = MachineStore(paths: paths)
-        try store.save(["old": Machine(ip: "9.9.9.9", services: [:])])
+        try store.save(MachineFile(machines: ["old": Machine(ip: "9.9.9.9", services: [:])]))
         let before = try Data(contentsOf: paths.machines)
         runner.onAny("curl", handler: curlWriting(download))
 
@@ -171,7 +178,7 @@ import Testing
         let download = #"{"m": {"ip": "1.2.3.4\nserver { listen 4444; }", "services": {}}, "m": {"ip": "10.0.0.1", "services": {}}}"#
         runner.onAny("curl", handler: curlWriting(download))
         let machines = try? await Syncer(runner: runner).fetch(SyncSettings(url: "https://example.com/m.json"))
-        #expect(machines == nil || machines?["m"]?.ip == "10.0.0.1")
+        #expect(machines == nil || machines?.all["m"]?.ip == "10.0.0.1")
     }
 
     @Test func aTokenInTheSyncURLNeverReachesTheLog() async throws {

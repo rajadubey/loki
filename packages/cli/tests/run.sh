@@ -143,6 +143,19 @@ machines() {
 }
 EOF
 }
+# c1 and c2 get the shared services; solo has its own
+containers() {
+  cat > "$(L machine.json)" <<'EOF'
+{
+  "containers": {"c1": "10.0.1.1", "c2": "10.0.1.2"},
+  "services": {
+    "web": {"local": 8080, "remote": 80},
+    "api": {"local": 9000, "remote": 9001}
+  },
+  "solo": {"ip": "10.0.2.1", "services": {"ssh": {"local": 2222, "remote": 22}}}
+}
+EOF
+}
 header_ok() {  # header_ok <file> <name> <ip>
   local ip; ip=$(printf '%s' "$3" | sed 's/\./\\./g')
   head -1 "$1" | grep -qE "^# Auto-generated remote\.conf for $2 \($ip\) \[[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}\]\$"
@@ -686,6 +699,13 @@ test_security_sync_rejects_unsafe_downloads() {
 {"../m": {"ip": "1.2.3.4", "services": {}}}
 {"m\nx": {"ip": "1.2.3.4", "services": {}}}
 {"m": {"ip": "1.2.3.4"}}
+{"containers": {"m": "1.2.3.4; include /etc/passwd"}}
+{"containers": {"m\nx": "1.2.3.4"}}
+{"containers": {"services": "1.2.3.4"}}
+{"containers": {"m": "1.2.3.4"}, "m": {"ip": "1.2.3.5", "services": {}}}
+{"containers": ["1.2.3.4"]}
+{"containers": {"m": "1.2.3.4"}, "services": {"web}; server { listen 1": {"local": 8080, "remote": 80}}}
+{"containers": {"m": "1.2.3.4"}, "services": {"web": {"local": 8080, "remote": null}}}
 {} {}
 []
 <html><body>Sign in</body></html>
@@ -805,6 +825,75 @@ run_installer() {
 }
 OLD_LOKI='#!/usr/bin/env bash
 VERSION=1.0.0'
+
+test_containers_are_listed_with_the_other_machines() {
+  containers; set_active c2
+  loki list
+  rc_ok "list"
+  eq "output" "Available machines:
+  - c1
+  * c2
+  - solo" "$OUT"
+}
+
+test_connect_container_gets_the_shared_services() {
+  containers
+  loki connect c1
+  rc_ok "connect"
+  eq "active" c1 "$(active)"
+  check "header has the container's IP" header_ok "$(DEST)" c1 10.0.1.1
+  { head -1 "$(DEST)"; printf '\nupstream api {\n    server 10.0.1.1:9001;\n}\nserver {\n    listen 127.0.0.1:9000;\n    proxy_pass api;\n}\n'
+    printf '\nupstream web {\n    server 10.0.1.1:80;\n}\nserver {\n    listen 127.0.0.1:8080;\n    proxy_pass web;\n}\n'; } > "$SB/expected"
+  check "remote.conf exact" cmp -s "$SB/expected" "$(DEST)"
+}
+
+test_connect_machine_of_its_own_gets_only_its_services() {
+  containers
+  loki connect solo
+  rc_ok "connect"
+  eq "one upstream" 1 "$(grep -c '^upstream ' "$(DEST)")"
+  has "its own service" "server 10.0.2.1:22;" "$(cat "$(DEST)")"
+}
+
+test_status_and_ping_read_a_containers_shared_services() {
+  containers; set_active c2
+  loki status
+  rc_ok "status"
+  eq "output" "📡 Active machine: c2 (10.0.1.2)
+ - web: local=8080, remote=80
+ - api: local=9000, remote=9001" "$OUT"
+  loki ping
+  has "pings a shared port" "api (localhost:9000)" "$OUT"
+}
+
+test_sync_keeps_containers_and_reloads_an_active_one() {
+  containers; set_active c1
+  echo "LOKI_SYNC_URL='https://example.test/m.json'" > "$(L config)"
+  jq '.containers.c1 = "10.0.1.9"' "$(L machine.json)" > "$FAKE/download"
+  loki sync
+  rc_ok "sync"
+  check "saved as written" same_json "$FAKE/download" "$(L machine.json)"
+  eq "still connected" c1 "$(active)"
+  has "reloaded with the new IP" "server 10.0.1.9:80;" "$(cat "$(DEST)")"
+}
+
+test_sync_disconnects_a_container_that_was_removed() {
+  containers; set_active c2
+  echo "LOKI_SYNC_URL='https://example.test/m.json'" > "$(L config)"
+  jq 'del(.containers.c2)' "$(L machine.json)" > "$FAKE/download"
+  loki sync
+  rc_ok "sync"
+  eq "disconnected" "<none>" "$(active)"
+  has "says why" "c2 was removed from machine.json" "$OUT"
+}
+
+test_security_connect_refuses_a_container_with_unsafe_shared_services() {
+  echo '{"containers": {"c": "10.0.0.1"}, "services": {"web}; server { listen 9999": {"local": 8080, "remote": 80}}}' > "$(L machine.json)"
+  loki connect c
+  rc_fail "connect"
+  has "error" "can't be used for c" "$OUT"
+  eq "nginx untouched" "" "$(calls)"
+}
 
 test_installer_rerun_updates_in_place() {
   machines; cp "$(L machine.json)" "$SB/before"
